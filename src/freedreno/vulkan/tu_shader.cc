@@ -3771,18 +3771,21 @@ tu_lower_nir(struct tu_device *dev,
       NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysval_options);
    }
 
-   /* This has to happen before lower_input_attachments, because we have to
-    * lower input attachment coordinates except if unscaled.
-    */
-   const struct lower_fdm_options fdm_options = {
-      .num_views = MAX2(key->multiview_mask ?
-                        util_last_bit(key->multiview_mask) :
-                        key->max_fdm_layers, 1),
-      .adjust_fragcoord = key->fragment_density_map,
-      .use_layer = !key->multiview_mask,
-      .adjust_gmem_fragcoord = key->fragment_density_map && key->custom_resolve,
-   };
-   NIR_PASS(_, nir, tu_nir_lower_fdm, &fdm_options);
+   /* P2-1: FDM lowering only touches FS intrinsics (load_frag_coord /
+    * load_frag_size / load_frag_coord_gmem_ir3). Old code ran a full
+    * instruction scan for every stage including VS/TCS/TES/GS/CS where it
+    * is always a no-op. */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      const struct lower_fdm_options fdm_options = {
+         .num_views = MAX2(key->multiview_mask ?
+                           util_last_bit(key->multiview_mask) :
+                           key->max_fdm_layers, 1),
+         .adjust_fragcoord = key->fragment_density_map,
+         .use_layer = !key->multiview_mask,
+         .adjust_gmem_fragcoord = key->fragment_density_map && key->custom_resolve,
+      };
+      NIR_PASS(_, nir, tu_nir_lower_fdm, &fdm_options);
+   }
 
    if (nir->info.stage != MESA_SHADER_FRAGMENT &&
        nir->info.stage != MESA_SHADER_COMPUTE &&
@@ -3793,9 +3796,12 @@ tu_lower_nir(struct tu_device *dev,
 
    /* Note that nir_opt_barrier_modes here breaks tests such as
     * dEQP-VK.memory_model.message_passing.ext.u32.coherent.fence_atomic.atomicwrite.device.payload_local.image.guard_local.buffer.vert
+    *
+    * P2-1: full-instruction scan, skip when the shader uses no memory
+    * barriers at all (the common case for VS/FS).
     */
-
-   NIR_PASS(_, nir, nir_opt_acquire_release_barriers, SCOPE_QUEUE_FAMILY);
+   if (nir->info.uses_memory_barrier)
+      NIR_PASS(_, nir, nir_opt_acquire_release_barriers, SCOPE_QUEUE_FAMILY);
 
    /* This needs to happen before multiview lowering which rewrites store
     * instructions of the position variable, so that we can just rewrite one
