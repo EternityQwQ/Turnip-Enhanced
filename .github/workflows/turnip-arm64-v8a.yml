@@ -1,0 +1,86 @@
+name: Turnip arm64-v8a
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-turnip-arm64-v8a:
+    runs-on: ubuntu-22.04
+    env:
+      BUILD_DIR: build-android-aarch64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+          add-to-path: true
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build flex bison python3-pip python3-mako python3-packaging pkg-config patchelf zip file
+          pip3 install --upgrade meson
+          meson --version
+          ninja --version
+          ls "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep aarch64
+          "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" --version
+      - name: Generate Meson cross file
+        run: |
+          NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME}}"
+          echo "NDK_ROOT=$NDK_ROOT"
+          printf "[constants]\nndk_path = '%s'\n\n[binaries]\nar = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'\nc = [ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang']\ncpp = [ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']\nc_ld = 'lld'\ncpp_ld = 'lld'\nstrip = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-strip'\npkgconfig = ['/usr/bin/pkg-config']\n\n[host_machine]\nsystem = 'android'\ncpu_family = 'aarch64'\ncpu = 'armv8'\nendian = 'little'\n" "$NDK_ROOT" > android-aarch64
+          cat android-aarch64
+      - name: Meson setup
+        run: |
+          meson setup "$BUILD_DIR" \
+            --cross-file android-aarch64 \
+            --buildtype=release \
+            -Dplatforms=android \
+            -Dplatform-sdk-version=34 \
+            -Dandroid-stub=true \
+            -Dandroid-libbacktrace=disabled \
+            -Degl=disabled \
+            -Dglx=disabled \
+            -Dgbm=disabled \
+            -Dopengl=false \
+            -Dgles1=disabled \
+            -Dgles2=disabled \
+            -Dllvm=disabled \
+            -Dgallium-drivers= \
+            -Dvulkan-drivers=freedreno \
+            -Dfreedreno-kmds=kgsl,msm,virtio
+      - name: Compile
+        run: |
+          meson compile -C "$BUILD_DIR"
+      - name: Verify artifacts
+        run: |
+          ls -lh "$BUILD_DIR/src/freedreno/vulkan/"
+          file "$BUILD_DIR/src/freedreno/vulkan/"*.so
+          ls -lh "$BUILD_DIR/src/freedreno/vulkan/"*.json || true
+      - name: Package
+        run: |
+          mkdir -p dist/turnip-arm64-v8a
+          cp "$BUILD_DIR/src/freedreno/vulkan/"*.so dist/turnip-arm64-v8a/
+          cp "$BUILD_DIR/src/freedreno/vulkan/"*.json dist/turnip-arm64-v8a/ || true
+          cp VERSION dist/turnip-arm64-v8a/
+          git rev-parse --short HEAD > dist/turnip-arm64-v8a/commit.txt
+          meson introspect "$BUILD_DIR" --buildoptions | grep -E "vulkan-drivers|freedreno-kmds|platforms|buildtype" > dist/turnip-arm64-v8a/buildoptions.txt || true
+          (cd dist && zip -r ../turnip-arm64-v8a.zip turnip-arm64-v8a)
+          ls -lh turnip-arm64-v8a.zip
+          unzip -l turnip-arm64-v8a.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: turnip-arm64-v8a
+          path: turnip-arm64-v8a.zip
+          retention-days: 14
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs
+          path: build-android-aarch64/meson-logs/
+          retention-days: 5
