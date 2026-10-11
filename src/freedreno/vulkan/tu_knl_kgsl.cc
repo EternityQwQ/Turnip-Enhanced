@@ -3027,6 +3027,7 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
    static const char dma_heap_path[] = "/dev/dma_heap/system";
    static const char ion_path[] = "/dev/ion";
    int dma_fd;
+   uint32_t dummy_timeline_id;
 
    dma_fd = open(dma_heap_path, O_RDONLY);
    if (dma_fd >= 0) {
@@ -3094,7 +3095,6 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
    device->submitqueue_priority_count = ARRAY_SIZE(kgsl_context_priorities);
 
    /* Prefer timeline-based sync implementation if supported by the kernel. */
-   uint32_t dummy_timeline_id = 0;
    if (kgsl_timeline_create_ioctl(fd, 0, &dummy_timeline_id) == 0) {
       kgsl_timeline_destroy_ioctl(fd, dummy_timeline_id);
       device->kgsl_sync_impl_type = TU_KGSL_SYNC_IMPL_TYPE_TIMELINE;
