@@ -33,7 +33,7 @@ jobs:
         run: |
           NDK_ROOT="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME}}"
           echo "NDK_ROOT=$NDK_ROOT"
-          printf "[constants]\nndk_path = '%s'\n\n[binaries]\nar = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'\nc = [ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang']\ncpp = [ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']\nc_ld = 'lld'\ncpp_ld = 'lld'\nstrip = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android-strip'\npkgconfig = ['/usr/bin/pkg-config']\n\n[host_machine]\nsystem = 'android'\ncpu_family = 'aarch64'\ncpu = 'armv8'\nendian = 'little'\n" "$NDK_ROOT" > android-aarch64
+          printf "[constants]\nndk_path = '%s'\n\n[binaries]\nar = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'\nc = [ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang']\ncpp = [ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables', '--start-no-unused-arguments', '-static-libstdc++', '--end-no-unused-arguments']\nc_ld = 'lld'\ncpp_ld = 'lld'\nstrip = ndk_path / 'toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip'\npkg-config = ['/usr/bin/pkg-config']\n\n[host_machine]\nsystem = 'android'\ncpu_family = 'aarch64'\ncpu = 'armv8'\nendian = 'little'\n" "$NDK_ROOT" > android-aarch64
           cat android-aarch64
       - name: Meson setup
         run: |
