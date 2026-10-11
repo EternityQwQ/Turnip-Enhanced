@@ -1258,26 +1258,40 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
    uint32_t extra_signal_count =
       (queue->type == TU_QUEUE_GFX && has_vm_bind) ? 1 : 0;
 
-   /* Allocate without wait timeline semaphores */
-   in_syncobjs = (struct drm_msm_syncobj *) vk_zalloc(
-      &queue->device->vk.alloc,
-      (wait_count + extra_wait_count) * sizeof(*in_syncobjs), 8,
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   /* P0-4: small submits (the common case: 0-2 syncs) avoid two
+    * vk_zalloc/vk_free per submit. Use stack arrays, heap only for large. */
+   struct drm_msm_syncobj in_stack[4], out_stack[4];
+   bool in_heap = (wait_count + extra_wait_count) > 4;
+   bool out_heap = (signal_count + extra_signal_count) > 4;
 
-   if (in_syncobjs == NULL) {
-      result = vk_error(queue, VK_ERROR_OUT_OF_HOST_MEMORY);
-      goto fail_in_syncobjs;
+   if (!in_heap) {
+      in_syncobjs = (wait_count + extra_wait_count) ? in_stack : NULL;
+   } else {
+      /* Allocate without wait timeline semaphores */
+      in_syncobjs = (struct drm_msm_syncobj *) vk_zalloc(
+         &queue->device->vk.alloc,
+         (wait_count + extra_wait_count) * sizeof(*in_syncobjs), 8,
+         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+
+      if (in_syncobjs == NULL) {
+         result = vk_error(queue, VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto fail_in_syncobjs;
+      }
    }
 
-   /* Allocate with signal timeline semaphores considered */
-   out_syncobjs = (struct drm_msm_syncobj *) vk_zalloc(
-      &queue->device->vk.alloc,
-      (signal_count + extra_signal_count) * sizeof(*out_syncobjs), 8,
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+   if (!out_heap) {
+      out_syncobjs = (signal_count + extra_signal_count) ? out_stack : NULL;
+   } else {
+      /* Allocate with signal timeline semaphores considered */
+      out_syncobjs = (struct drm_msm_syncobj *) vk_zalloc(
+         &queue->device->vk.alloc,
+         (signal_count + extra_signal_count) * sizeof(*out_syncobjs), 8,
+         VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
 
-   if (out_syncobjs == NULL) {
-      result = vk_error(queue, VK_ERROR_OUT_OF_HOST_MEMORY);
-      goto fail_out_syncobjs;
+      if (out_syncobjs == NULL) {
+         result = vk_error(queue, VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto fail_out_syncobjs;
+      }
    }
 
    for (uint32_t i = 0; i < wait_count; i++) {
@@ -1554,9 +1568,11 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
    }
 
 fail_submit:
-   vk_free(&queue->device->vk.alloc, out_syncobjs);
+   if (out_heap)
+      vk_free(&queue->device->vk.alloc, out_syncobjs);
 fail_out_syncobjs:
-   vk_free(&queue->device->vk.alloc, in_syncobjs);
+   if (in_heap)
+      vk_free(&queue->device->vk.alloc, in_syncobjs);
 fail_in_syncobjs:
    return result;
 }

@@ -2565,115 +2565,76 @@ kgsl_queue_submit_timeline(struct tu_queue *queue, void *_submit,
    const uint64_t previous_submit_timeline_seqno = queue->kgsl_queue_timeline_seqno;
    const uint64_t current_submit_timeline_seqno = previous_submit_timeline_seqno + 1;
 
+   /* P0-2: single-pass classification. Old code did 5 passes over
+    * waits/signals (count + fill + fence loop) with a switch +
+    * get_sync_type per element per pass. Allocate upper bounds directly
+    * (wait_count+1 / signal_count+1) and fill in one pass each. */
+   STACK_ARRAY(struct kgsl_timeline_val, wait_timeline_vals, wait_count + 1);
+   STACK_ARRAY(struct kgsl_cmd_syncpoint_fence, cmd_syncpoint_fence, wait_count ? wait_count : 1);
    uint32_t wait_timeline_vals_count = 0;
    uint32_t wait_fences_count = 0;
    {
       for (uint32_t i = 0; i < wait_count; ++i) {
-         switch (vk_kgsl_get_sync_type(waits[i].sync)) {
-         case VK_KGSL_SYNC_TYPE_TIMELINE:
-         case VK_KGSL_SYNC_TYPE_BINARY:
-            ++wait_timeline_vals_count;
-            break;
-         case VK_KGSL_SYNC_TYPE_FENCE:
-            ++wait_fences_count;
-            break;
-         case VK_KGSL_SYNC_TYPE_INVALID:
-            assert(!"invalid sync type");
-            break;
-         }
-      }
-
-      ++wait_timeline_vals_count;
-      assert(wait_timeline_vals_count + wait_fences_count == wait_count + 1);
-   }
-
-   STACK_ARRAY(struct kgsl_timeline_val, wait_timeline_vals, wait_timeline_vals_count);
-   {
-      uint32_t wait_timeline_vals_idx = 0;
-      for (uint32_t i = 0; i < wait_count; ++i) {
-         switch (vk_kgsl_get_sync_type(waits[i].sync)) {
-         case VK_KGSL_SYNC_TYPE_TIMELINE:
-         {
-            struct vk_kgsl_timeline *timeline = vk_kgsl_get_timeline(waits[i].sync);
-            wait_timeline_vals[wait_timeline_vals_idx++] = (struct kgsl_timeline_val) {
+         struct vk_sync *sync = waits[i].sync;
+         const struct vk_sync_type *type = sync->type;
+         if (type == &vk_kgsl_timeline_type) {
+            struct vk_kgsl_timeline *timeline = vk_kgsl_get_timeline(sync);
+            wait_timeline_vals[wait_timeline_vals_count++] = (struct kgsl_timeline_val) {
                .seqno = waits[i].wait_value,
                .timeline = timeline->id,
             };
-            break;
-         }
-         case VK_KGSL_SYNC_TYPE_BINARY:
-         {
-            struct vk_kgsl_binary_timeline *binary_timeline = vk_kgsl_get_binary_timeline(waits[i].sync);
-            wait_timeline_vals[wait_timeline_vals_idx++] = (struct kgsl_timeline_val) {
-               .seqno = binary_timeline->next_point,
-               .timeline = binary_timeline->id,
-            };
-            break;
-         }
-         default:
-            break;
+         } else if (type == &vk_kgsl_binary_type) {
+            struct vk_kgsl_binary *binary =
+               container_of(sync, struct vk_kgsl_binary, vk);
+            if (binary->type == VK_KGSL_SYNC_TYPE_BINARY) {
+               wait_timeline_vals[wait_timeline_vals_count++] = (struct kgsl_timeline_val) {
+                  .seqno = binary->binary_timeline.next_point,
+                  .timeline = binary->binary_timeline.id,
+               };
+            } else {
+               assert(binary->type == VK_KGSL_SYNC_TYPE_FENCE);
+               struct vk_kgsl_sync_file *sync_file = &binary->sync_file;
+               cmd_syncpoint_fence[wait_fences_count++] =
+                  (struct kgsl_cmd_syncpoint_fence){ .fd = sync_file->fd, };
+            }
+         } else {
+            assert(!"invalid sync type");
          }
       }
 
-      wait_timeline_vals[wait_timeline_vals_idx++] = (struct kgsl_timeline_val) {
+      wait_timeline_vals[wait_timeline_vals_count++] = (struct kgsl_timeline_val) {
          .seqno = previous_submit_timeline_seqno,
          .timeline = queue->kgsl_queue_timeline_id
       };
-      assert(wait_timeline_vals_idx == wait_timeline_vals_count);
    }
 
+   STACK_ARRAY(struct kgsl_timeline_val, signal_timeline_vals, signal_count + 1);
    uint32_t signal_timeline_vals_count = 0;
    {
       for (uint32_t i = 0; i < signal_count; ++i) {
-         switch (vk_kgsl_get_sync_type(signals[i].sync)) {
-         case VK_KGSL_SYNC_TYPE_TIMELINE:
-         case VK_KGSL_SYNC_TYPE_BINARY:
-            ++signal_timeline_vals_count;
-            break;
-         case VK_KGSL_SYNC_TYPE_INVALID:
-         case VK_KGSL_SYNC_TYPE_FENCE:
-            assert(!"invalid sync type");
-            break;
-         }
-      }
-
-      ++signal_timeline_vals_count;
-      assert(signal_timeline_vals_count == signal_count + 1);
-   }
-
-   STACK_ARRAY(struct kgsl_timeline_val, signal_timeline_vals, signal_timeline_vals_count);
-   {
-      uint32_t signal_timeline_vals_idx = 0;
-      for (uint32_t i = 0; i < signal_count; ++i) {
-         switch (vk_kgsl_get_sync_type(signals[i].sync)) {
-         case VK_KGSL_SYNC_TYPE_TIMELINE:
-         {
-            struct vk_kgsl_timeline *timeline = vk_kgsl_get_timeline(signals[i].sync);
-            signal_timeline_vals[signal_timeline_vals_idx++] = (struct kgsl_timeline_val) {
+         struct vk_sync *sync = signals[i].sync;
+         if (sync->type == &vk_kgsl_timeline_type) {
+            struct vk_kgsl_timeline *timeline = vk_kgsl_get_timeline(sync);
+            signal_timeline_vals[signal_timeline_vals_count++] = (struct kgsl_timeline_val) {
                .seqno = signals[i].signal_value,
                .timeline = timeline->id,
             };
-            break;
-         }
-         case VK_KGSL_SYNC_TYPE_BINARY:
-         {
-            struct vk_kgsl_binary_timeline *binary_timeline = vk_kgsl_get_binary_timeline(signals[i].sync);
-            signal_timeline_vals[signal_timeline_vals_idx++] = (struct kgsl_timeline_val) {
-               .seqno = ++binary_timeline->next_point,
-               .timeline = binary_timeline->id,
+         } else {
+            assert(sync->type == &vk_kgsl_binary_type);
+            struct vk_kgsl_binary *binary =
+               container_of(sync, struct vk_kgsl_binary, vk);
+            assert(binary->type == VK_KGSL_SYNC_TYPE_BINARY);
+            signal_timeline_vals[signal_timeline_vals_count++] = (struct kgsl_timeline_val) {
+               .seqno = ++binary->binary_timeline.next_point,
+               .timeline = binary->binary_timeline.id,
             };
-            break;
-         }
-         default:
-            break;
          }
       }
 
-      signal_timeline_vals[signal_timeline_vals_idx++] = (struct kgsl_timeline_val) {
+      signal_timeline_vals[signal_timeline_vals_count++] = (struct kgsl_timeline_val) {
          .seqno = current_submit_timeline_seqno,
          .timeline = queue->kgsl_queue_timeline_id
       };
-      assert(signal_timeline_vals_idx == signal_timeline_vals_count);
    }
 
    uint32_t cmd_syncpoints_count = 0;
@@ -2683,7 +2644,7 @@ kgsl_queue_submit_timeline(struct tu_queue *queue, void *_submit,
       cmd_syncpoints_count += wait_fences_count;
 
    struct kgsl_cmd_syncpoint_timeline cmd_syncpoint_timeline;
-   STACK_ARRAY(struct kgsl_cmd_syncpoint_fence, cmd_syncpoint_fence, wait_fences_count);
+   /* P0-2: cmd_syncpoint_fence already filled in single wait pass, no third loop. */
    STACK_ARRAY(struct kgsl_command_syncpoint, cmd_syncpoints, cmd_syncpoints_count);
    {
       uint32_t syncpoint_idx = 0;
@@ -2700,27 +2661,14 @@ kgsl_queue_submit_timeline(struct tu_queue *queue, void *_submit,
          };
       }
 
-      uint32_t syncpoint_fence_idx = 0;
-      for (uint32_t i = 0; i < wait_count; ++i) {
-         if (vk_kgsl_get_sync_type(waits[i].sync) != VK_KGSL_SYNC_TYPE_FENCE)
-            continue;
-
-         struct vk_kgsl_sync_file *sync_file = vk_kgsl_get_sync_file(waits[i].sync);
-         cmd_syncpoint_fence[syncpoint_fence_idx] = (struct kgsl_cmd_syncpoint_fence) {
-            .fd = sync_file->fd,
-         };
-
-         cmd_syncpoints[syncpoint_idx] = (struct kgsl_command_syncpoint) {
-            .priv = (uint64_t)(uintptr_t) &cmd_syncpoint_fence[syncpoint_fence_idx],
+      for (uint32_t f = 0; f < wait_fences_count; f++) {
+         cmd_syncpoints[syncpoint_idx++] = (struct kgsl_command_syncpoint) {
+            .priv = (uint64_t)(uintptr_t) &cmd_syncpoint_fence[f],
             .size = sizeof(struct kgsl_cmd_syncpoint_fence),
             .type = KGSL_CMD_SYNCPOINT_TYPE_FENCE,
          };
-
-         ++syncpoint_fence_idx;
-         ++syncpoint_idx;
       }
 
-      assert(syncpoint_fence_idx == wait_fences_count);
       assert(syncpoint_idx == cmd_syncpoints_count);
    }
 
