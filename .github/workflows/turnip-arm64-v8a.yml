@@ -8,9 +8,14 @@ permissions:
   contents: read
 jobs:
   build-turnip-arm64-v8a:
+    strategy:
+      fail-fast: false
+      matrix:
+        kmd: [kgsl, msm, virtio]
     runs-on: ubuntu-24.04
     env:
-      BUILD_DIR: build-android-aarch64
+      BUILD_DIR: build-android-aarch64-${{ matrix.kmd }}
+      KMD: ${{ matrix.kmd }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,7 +63,7 @@ jobs:
             -Dspirv-tools=disabled \
             -Dgallium-drivers= \
             -Dvulkan-drivers=freedreno \
-            -Dfreedreno-kmds=kgsl,msm,virtio \
+            -Dfreedreno-kmds=$KMD \
             -Dallow-fallback-for=libdrm \
             -Dlibarchive:openssl=disabled \
             -Dlibarchive:zlib=disabled \
@@ -81,25 +86,25 @@ jobs:
           ls -lh "$BUILD_DIR/src/freedreno/vulkan/"*.json || true
       - name: Package
         run: |
-          mkdir -p dist/turnip-arm64-v8a
-          cp "$BUILD_DIR/src/freedreno/vulkan/"*.so dist/turnip-arm64-v8a/
-          cp "$BUILD_DIR/src/freedreno/vulkan/"*.json dist/turnip-arm64-v8a/ || true
-          cp VERSION dist/turnip-arm64-v8a/
-          git rev-parse --short HEAD > dist/turnip-arm64-v8a/commit.txt
-          meson introspect "$BUILD_DIR" --buildoptions | grep -E "vulkan-drivers|freedreno-kmds|platforms|buildtype" > dist/turnip-arm64-v8a/buildoptions.txt || true
-          (cd dist && zip -r ../turnip-arm64-v8a.zip turnip-arm64-v8a)
-          ls -lh turnip-arm64-v8a.zip
-          unzip -l turnip-arm64-v8a.zip
+          mkdir -p dist/turnip-arm64-v8a-$KMD
+          cp "$BUILD_DIR/src/freedreno/vulkan/"*.so dist/turnip-arm64-v8a-$KMD/
+          cp "$BUILD_DIR/src/freedreno/vulkan/"*.json dist/turnip-arm64-v8a-$KMD/ || true
+          cp VERSION dist/turnip-arm64-v8a-$KMD/
+          git rev-parse --short HEAD > dist/turnip-arm64-v8a-$KMD/commit.txt
+          meson introspect "$BUILD_DIR" --buildoptions | grep -E "vulkan-drivers|freedreno-kmds|platforms|buildtype" > dist/turnip-arm64-v8a-$KMD/buildoptions.txt || true
+          (cd dist && zip -r ../turnip-arm64-v8a-$KMD.zip turnip-arm64-v8a-$KMD)
+          ls -lh turnip-arm64-v8a-$KMD.zip
+          unzip -l turnip-arm64-v8a-$KMD.zip
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: turnip-arm64-v8a
-          path: turnip-arm64-v8a.zip
+          name: turnip-arm64-v8a-${{ matrix.kmd }}
+          path: turnip-arm64-v8a-${{ matrix.kmd }}.zip
           retention-days: 14
       - name: Upload meson logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: meson-logs
-          path: build-android-aarch64/meson-logs/
+          name: meson-logs-${{ matrix.kmd }}
+          path: ${{ env.BUILD_DIR }}/meson-logs/
           retention-days: 5
