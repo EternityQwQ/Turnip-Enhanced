@@ -629,6 +629,8 @@ tu_queue_init(struct tu_device *device,
    queue->fence = -1;
    queue->priority = -1;
    queue->msm_queue_id = 0;
+   queue->kgsl_queue_timeline_id = 0;
+   queue->kgsl_queue_timeline_seqno = 0;
 
    if (shared_queue) {
       /* Emulated queue: submissions are redirected to the real queue by
