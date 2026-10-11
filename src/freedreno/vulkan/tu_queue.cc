@@ -461,6 +461,10 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 
    struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
 
+   /* Declared up here so the goto-based error paths below don't bypass
+    * its initialization (ill-formed C++); assigned after submit. */
+   uint32_t submission_id = 0;
+
    void *submit = tu_submit_create(device);
    if (!submit)
       goto fail_create_submit;
@@ -572,7 +576,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 
    /* Only submit_count + submission_id need the lock.
     * Flush/stats are pure CPU work, do them unlocked. */
-   uint32_t submission_id = device->submit_count++;
+   submission_id = device->submit_count++;
    if (u_trace_submission_data) {
       u_trace_submission_data->submission_id = submission_id;
       u_trace_submission_data->queue = queue;
