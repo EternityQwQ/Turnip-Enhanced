@@ -54,7 +54,8 @@ jobs:
             -Dllvm=disabled \
             -Dgallium-drivers= \
             -Dvulkan-drivers=freedreno \
-            -Dfreedreno-kmds=kgsl,msm,virtio
+            -Dfreedreno-kmds=kgsl,msm,virtio \
+            -Dallow-fallback-for=libdrm
       - name: Compile
         run: |
           meson compile -C "$BUILD_DIR"
