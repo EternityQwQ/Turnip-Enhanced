@@ -25,6 +25,8 @@
 #include "tu_device.h"
 #include "tu_rmv.h"
 
+#include <sched.h>
+
 #define NSEC_PER_SEC 1000000000ull
 #define WAIT_TIMEOUT 5
 #define __COUNTER_REG(CHIP, name) __RBBM_PIPESTAT_ ## name <CHIP>({})
@@ -620,13 +622,34 @@ wait_for_available(struct tu_device *device, struct tu_query_pool *pool,
 {
    /* TODO: Use the MSM_IOVA_WAIT ioctl to wait on the available bit in a
     * scheduler friendly way instead of busy polling once the patch has landed
-    * upstream. */
+    * upstream. Until then use exponential backoff to avoid burning a CPU
+    * core: tight spin first (GPU usually signals within microseconds),
+    * then yield, then progressively longer sleeps.
+    */
    struct query_slot *slot = slot_address(pool, query);
    uint64_t abs_timeout = os_time_get_absolute_timeout(
          WAIT_TIMEOUT * NSEC_PER_SEC);
+   uint32_t spin = 0;
+   uint64_t sleep_us = 50;
    while(os_time_get_nano() < abs_timeout) {
       if (query_is_available(slot))
          return VK_SUCCESS;
+      spin++;
+      if (spin < 256) {
+         /* hot spin: signal is usually imminent, avoid syscall */
+#if defined(__x86_64__) || defined(__i386__)
+         __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+         __asm__ volatile("yield" ::: "memory");
+#endif
+         continue;
+      } else if (spin < 1024) {
+         sched_yield();
+      } else {
+         os_time_sleep(sleep_us);
+         if (sleep_us < 1000)
+            sleep_us *= 2;
+      }
    }
    return vk_error(device, VK_TIMEOUT);
 }
