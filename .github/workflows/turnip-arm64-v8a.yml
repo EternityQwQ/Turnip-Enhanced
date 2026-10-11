@@ -53,6 +53,7 @@ jobs:
             -Dgles2=disabled \
             -Dllvm=disabled \
             -Dzstd=disabled \
+            -Dspirv-tools=disabled \
             -Dgallium-drivers= \
             -Dvulkan-drivers=freedreno \
             -Dfreedreno-kmds=kgsl,msm,virtio \
