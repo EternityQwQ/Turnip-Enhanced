@@ -35,7 +35,7 @@ tu_bo_suballocator_init(struct tu_suballocator *suballoc,
    suballoc->default_size = default_size;
    suballoc->flags = flags;
    suballoc->bo = NULL;
-   suballoc->cached_bo = NULL;
+   suballoc->cached_count = 0;
    suballoc->name = name;
 }
 
@@ -44,8 +44,9 @@ tu_bo_suballocator_finish(struct tu_suballocator *suballoc)
 {
    if (suballoc->bo)
       tu_bo_finish(suballoc->dev, suballoc->bo);
-   if (suballoc->cached_bo)
-      tu_bo_finish(suballoc->dev, suballoc->cached_bo);
+   for (uint32_t i = 0; i < suballoc->cached_count; i++)
+      tu_bo_finish(suballoc->dev, suballoc->cached_bos[i]);
+   suballoc->cached_count = 0;
 }
 
 VkResult
@@ -71,13 +72,39 @@ tu_suballoc_bo_alloc(struct tu_suballoc_bo *suballoc_bo,
 
    uint32_t alloc_size = MAX2(size, suballoc->default_size);
 
-   /* Reuse a recycled suballoc BO if we have one and it's big enough, otherwise free it. */
-   if (suballoc->cached_bo) {
-      if (alloc_size <= suballoc->cached_bo->size)
-         suballoc->bo = suballoc->cached_bo;
-      else
-         tu_bo_finish(suballoc->dev, suballoc->cached_bo);
-      suballoc->cached_bo = NULL;
+   /* Reuse the smallest recycled BO that fits (best-fit over tiny MRU pool),
+    * freeing the rest lazily. Old code had a single slot: a large allocation
+    * evicted it even when the working set needed both sizes. */
+   if (suballoc->cached_count) {
+      uint32_t best = UINT32_MAX;
+      for (uint32_t i = 0; i < suballoc->cached_count; i++) {
+         if (suballoc->cached_bos[i]->size >= alloc_size &&
+             suballoc->cached_bos[i]->size < best)
+            best = suballoc->cached_bos[i]->size;
+      }
+      if (best != UINT32_MAX) {
+         for (uint32_t i = 0; i < suballoc->cached_count; i++) {
+            if (suballoc->cached_bos[i]->size == best) {
+               suballoc->bo = suballoc->cached_bos[i];
+               suballoc->cached_bos[i] =
+                  suballoc->cached_bos[--suballoc->cached_count];
+               break;
+            }
+         }
+      } else if (suballoc->cached_count == TU_SUBALLOC_CACHED_BOS) {
+         /* Pool full and nothing fits: drop the smallest to make room. */
+         uint32_t smallest = 0;
+         for (uint32_t i = 1; i < suballoc->cached_count; i++) {
+            if (suballoc->cached_bos[i]->size <
+                suballoc->cached_bos[smallest]->size)
+               smallest = i;
+         }
+         if (suballoc->cached_bos[smallest]->size < alloc_size) {
+            tu_bo_finish(suballoc->dev, suballoc->cached_bos[smallest]);
+            suballoc->cached_bos[smallest] =
+               suballoc->cached_bos[--suballoc->cached_count];
+         }
+      }
    }
 
    /* Allocate the new BO if we didn't have one cached. */
@@ -109,11 +136,11 @@ tu_suballoc_bo_free(struct tu_suballocator *suballoc, struct tu_suballoc_bo *bo)
    if (!bo->bo)
       return;
 
-   /* If we we held the last reference to this BO, so just move it to the
-    * suballocator for the next time we need to allocate.
-    */
-   if (p_atomic_read(&bo->bo->refcnt) == 1 && !suballoc->cached_bo) {
-      suballoc->cached_bo = bo->bo;
+   /* If we held the last reference to this BO, recycle it into the MRU
+    * pool for the next allocation instead of freeing it. */
+   if (p_atomic_read(&bo->bo->refcnt) == 1 &&
+       suballoc->cached_count < TU_SUBALLOC_CACHED_BOS) {
+      suballoc->cached_bos[suballoc->cached_count++] = bo->bo;
       return;
    }
 

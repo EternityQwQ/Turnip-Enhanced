@@ -1560,6 +1560,11 @@ tu_autotune::get_rp_latency_info(uint64_t rp_hash, bool unmark_sensitive)
 void
 tu_autotune::process_entries()
 {
+   /* P3-4: fast path for compute-only / no-RP submits. Old code did an MMIO
+    * read of autotune_fence on every submit even with nothing pending. */
+   if (active_batches.empty())
+      return;
+
    uint32_t current_fence = device->global_bo_map->autotune_fence;
 
    while (!active_batches.empty()) {
@@ -1651,14 +1656,10 @@ struct tu_cs *
 tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_count)
 {
 
-   /* This call occurs regularly and we are single-threaded here, so we use this opportunity to process any available
-    * entries. It's also important that any entries are processed here because we always want to ensure that we've
-    * processed all entries from prior CBs before we submit any new CBs with the same RP to the GPU.
-    */
-   process_entries();
-   cleanup_latency_tracking();
-   reap_old_rp_histories();
-
+   /* P3-4: check for new work first. Old code ran process/cleanup/reap
+    * (MMIO read + map scans + locks) on every submit, even compute-only
+    * submits with nothing pending. Behavior-preserving: when there is
+    * pending or new work we still process first, as before. */
    bool has_results = false;
    for (uint32_t i = 0; i < cmd_buffer_count; i++) {
       auto &batch = cmd_buffers[i]->autotune_ctx.batch;
@@ -1667,6 +1668,17 @@ tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_c
          break;
       }
    }
+   if (!has_results && active_batches.empty())
+      return nullptr; /* Nothing pending and nothing new. */
+
+   /* This call occurs regularly and we are single-threaded here, so we use this opportunity to process any available
+    * entries. It's also important that any entries are processed here because we always want to ensure that we've
+    * processed all entries from prior CBs before we submit any new CBs with the same RP to the GPU.
+    */
+   process_entries();
+   cleanup_latency_tracking();
+   reap_old_rp_histories();
+
    if (!has_results)
       return nullptr; /* No results to process, return early. */
 
