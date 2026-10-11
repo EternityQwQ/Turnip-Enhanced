@@ -1,5 +1,6 @@
 name: Turnip arm64-v8a
 on:
+  push:
   workflow_dispatch:
   schedule:
     - cron: 0 0 1,15 * *
@@ -23,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build flex bison python3-pip python3-mako python3-packaging pkg-config patchelf zip file
+          sudo apt-get install -y ninja-build flex bison python3-pip python3-mako python3-packaging pkg-config patchelf zip file glslang-tools
           pip3 install --upgrade meson
           meson --version
           ninja --version
