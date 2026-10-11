@@ -1258,7 +1258,7 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
    uint32_t extra_signal_count =
       (queue->type == TU_QUEUE_GFX && has_vm_bind) ? 1 : 0;
 
-   /* P0-4: small submits (the common case: 0-2 syncs) avoid two
+   /* Small submits (the common case: 0-2 syncs) avoid two
     * vk_zalloc/vk_free per submit. Use stack arrays, heap only for large. */
    struct drm_msm_syncobj in_stack[4], out_stack[4];
    bool in_heap = (wait_count + extra_wait_count) > 4;

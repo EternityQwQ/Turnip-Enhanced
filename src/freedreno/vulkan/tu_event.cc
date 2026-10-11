@@ -81,7 +81,7 @@ tu_GetEventStatus(VkDevice _device, VkEvent _event)
    if (vk_device_is_lost(&device->vk))
       return VK_ERROR_DEVICE_LOST;
 
-   /* P3: GPU writes this via CP_MEM_WRITE while the CPU polls here.
+   /* GPU writes this via CP_MEM_WRITE while the CPU polls here.
     * Plain load risks a stale/torn read and a spin-retry storm up the
     * stack; atomic with acquire semantics is the same cost. */
    if (p_atomic_read(tu_event_map(event)) == 1)

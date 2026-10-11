@@ -5652,8 +5652,8 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_pipeline, pipeline, _pipeline);
 
    if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
-      /* P1-4: same compute pipeline rebind is a no-op. Old code re-emitted
-       * the shader state IB every time. */
+      /* Same compute pipeline rebind is a no-op; skip re-emitting
+       * the shader state IB. */
       if (cmd->state.last_compute_pipeline == pipeline)
          return;
       cmd->state.last_compute_pipeline = pipeline;
@@ -5667,8 +5667,8 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
 
    assert(pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS);
 
-   /* P1-4: same graphics pipeline rebind is a no-op. Old code unconditionally
-    * dirtied DESC_SETS/SHADER_CONSTS/VS_PARAMS/PROGRAM + memcpy program. */
+   /* Same graphics pipeline rebind is a no-op; skip the unconditional
+    * dirtying and program copy below. */
    if (cmd->state.last_gfx_pipeline == pipeline)
       return;
    cmd->state.last_gfx_pipeline = pipeline;
@@ -10145,7 +10145,7 @@ tu_barrier(struct tu_cmd_buffer *cmd,
            const VkDependencyInfo *dep_infos,
            bool no_sync)
 {
-   /* P1-5: empty barrier is a no-op. Apps (esp. DXVK/vkd3d) emit these. */
+   /* Empty barrier is a no-op. Apps (esp. DXVK/vkd3d) emit these. */
    if (dep_count == 0)
       return;
    VkPipelineStageFlags2 srcStage = 0;
@@ -10264,7 +10264,7 @@ tu_barrier(struct tu_cmd_buffer *cmd,
       }
    }
 
-   /* P1-5: no-op barrier (all masks zero) - skip flush emission entirely. */
+   /* No-op barrier (all masks zero) - skip flush emission entirely. */
    if (src_flags == 0 && dst_flags == 0 &&
        srcStage == 0 && dstStage == 0)
       return;

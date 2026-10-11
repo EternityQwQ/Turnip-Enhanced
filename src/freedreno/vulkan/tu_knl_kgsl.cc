@@ -2565,10 +2565,9 @@ kgsl_queue_submit_timeline(struct tu_queue *queue, void *_submit,
    const uint64_t previous_submit_timeline_seqno = queue->kgsl_queue_timeline_seqno;
    const uint64_t current_submit_timeline_seqno = previous_submit_timeline_seqno + 1;
 
-   /* P0-2: single-pass classification. Old code did 5 passes over
-    * waits/signals (count + fill + fence loop) with a switch +
-    * get_sync_type per element per pass. Allocate upper bounds directly
-    * (wait_count+1 / signal_count+1) and fill in one pass each. */
+   /* Single-pass classification over waits: allocate upper bounds directly
+    * (wait_count+1) and fill in one pass, avoiding repeated switches and
+    * get_sync_type calls per element per pass. */
    STACK_ARRAY(struct kgsl_timeline_val, wait_timeline_vals, wait_count + 1);
    STACK_ARRAY(struct kgsl_cmd_syncpoint_fence, cmd_syncpoint_fence, wait_count ? wait_count : 1);
    uint32_t wait_timeline_vals_count = 0;
@@ -2644,7 +2643,8 @@ kgsl_queue_submit_timeline(struct tu_queue *queue, void *_submit,
       cmd_syncpoints_count += wait_fences_count;
 
    struct kgsl_cmd_syncpoint_timeline cmd_syncpoint_timeline;
-   /* P0-2: cmd_syncpoint_fence already filled in single wait pass, no third loop. */
+   /* cmd_syncpoint_fence already filled in the single wait pass above,
+    * no extra loop over waits needed here. */
    STACK_ARRAY(struct kgsl_command_syncpoint, cmd_syncpoints, cmd_syncpoints_count);
    {
       uint32_t syncpoint_idx = 0;

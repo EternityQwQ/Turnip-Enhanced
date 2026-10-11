@@ -437,7 +437,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       (struct tu_cmd_buffer **) vk_submit->command_buffers;
    uint32_t cmdbuf_count = vk_submit->command_buffer_count;
 
-   /* P0-1: dynamic cmdbuf expansion does vk alloc/free + extra CS emit,
+   /* Dynamic cmdbuf expansion does vk alloc/free + extra CS emit,
     * no need to hold submit_mutex. Do it before taking the lock. */
    VkResult result =
       tu_insert_dynamic_cmdbufs(device, &cmd_buffers, &cmdbuf_count);
@@ -565,7 +565,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       goto out;
    }
 
-   /* P0-1: only submit_count + submission_id need the lock.
+   /* Only submit_count + submission_id need the lock.
     * Flush/stats are pure CPU work, do them unlocked. */
    uint32_t submission_id = device->submit_count++;
    if (u_trace_submission_data) {

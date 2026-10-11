@@ -3771,10 +3771,9 @@ tu_lower_nir(struct tu_device *dev,
       NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysval_options);
    }
 
-   /* P2-1: FDM lowering only touches FS intrinsics (load_frag_coord /
-    * load_frag_size / load_frag_coord_gmem_ir3). Old code ran a full
-    * instruction scan for every stage including VS/TCS/TES/GS/CS where it
-    * is always a no-op. */
+   /* FDM lowering only touches FS intrinsics (load_frag_coord /
+    * load_frag_size / load_frag_coord_gmem_ir3), so other stages would
+    * just pay for a full instruction scan that changes nothing. */
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       const struct lower_fdm_options fdm_options = {
          .num_views = MAX2(key->multiview_mask ?
@@ -3797,7 +3796,7 @@ tu_lower_nir(struct tu_device *dev,
    /* Note that nir_opt_barrier_modes here breaks tests such as
     * dEQP-VK.memory_model.message_passing.ext.u32.coherent.fence_atomic.atomicwrite.device.payload_local.image.guard_local.buffer.vert
     *
-    * P2-1: full-instruction scan, skip when the shader uses no memory
+    * Skip this full-instruction scan when the shader uses no memory
     * barriers at all (the common case for VS/FS).
     */
    if (nir->info.uses_memory_barrier)

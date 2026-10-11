@@ -1560,8 +1560,8 @@ tu_autotune::get_rp_latency_info(uint64_t rp_hash, bool unmark_sensitive)
 void
 tu_autotune::process_entries()
 {
-   /* P3-4: fast path for compute-only / no-RP submits. Old code did an MMIO
-    * read of autotune_fence on every submit even with nothing pending. */
+   /* Fast path for compute-only / no-RP submits: skip the MMIO
+    * read of autotune_fence when nothing is pending. */
    if (active_batches.empty())
       return;
 
@@ -1656,10 +1656,10 @@ struct tu_cs *
 tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_count)
 {
 
-   /* P3-4: check for new work first. Old code ran process/cleanup/reap
-    * (MMIO read + map scans + locks) on every submit, even compute-only
-    * submits with nothing pending. Behavior-preserving: when there is
-    * pending or new work we still process first, as before. */
+   /* Check for new work first so compute-only submits skip the
+    * process/cleanup/reap work (MMIO read + map scans + locks) when
+    * there is nothing pending and nothing new. Behavior-preserving:
+    * whenever there is pending or new work we still process first. */
    bool has_results = false;
    for (uint32_t i = 0; i < cmd_buffer_count; i++) {
       auto &batch = cmd_buffers[i]->autotune_ctx.batch;
