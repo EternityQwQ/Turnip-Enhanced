@@ -10264,8 +10264,10 @@ tu_barrier(struct tu_cmd_buffer *cmd,
       }
    }
 
-   /* No-op barrier (all masks zero) - skip flush emission entirely. */
-   if (src_flags == 0 && dst_flags == 0 &&
+   /* No-op barrier (all masks zero) - skip flush emission entirely.
+    * Note: src/dst_flags are BitmaskEnum, which has no operator==;
+    * test in boolean context like the rest of the driver does. */
+   if (!src_flags && !dst_flags &&
        srcStage == 0 && dstStage == 0)
       return;
 

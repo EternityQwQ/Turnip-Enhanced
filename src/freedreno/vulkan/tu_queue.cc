@@ -438,11 +438,16 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    uint32_t cmdbuf_count = vk_submit->command_buffer_count;
 
    /* Dynamic cmdbuf expansion does vk alloc/free + extra CS emit,
-    * no need to hold submit_mutex. Do it before taking the lock. */
+    * no need to hold submit_mutex. Do it before taking the lock.
+    * Note: must return directly here, not goto fail_create_submit,
+    * as that would jump over the initializations below (ill-formed C++). */
    VkResult result =
       tu_insert_dynamic_cmdbufs(device, &cmd_buffers, &cmdbuf_count);
-   if (result != VK_SUCCESS)
-      goto fail_create_submit;
+   if (result != VK_SUCCESS) {
+      if (cmd_buffers != (struct tu_cmd_buffer **) vk_submit->command_buffers)
+         vk_free(&queue->device->vk.alloc, cmd_buffers);
+      return result;
+   }
 
    pthread_mutex_lock(&device->submit_mutex);
 
