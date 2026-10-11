@@ -631,6 +631,10 @@ struct tu_cmd_state
    struct tu_vs_params last_vs_params;
    bool last_draw_indexed;
 
+   /* P1-4: same-pipeline rebind early-out. memset(0) at begin => NULL. */
+   const void *last_gfx_pipeline;
+   const void *last_compute_pipeline;
+
    struct tu_tess_params tess_params;
 
    uint64_t descriptor_buffer_iova[MAX_SETS];
