@@ -11,11 +11,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kmd: [kgsl, msm, virtio]
+        include:
+          - kmd: kgsl
+            kmds: kgsl
+          - kmd: msm
+            kmds: msm
+          - kmd: virtio
+            kmds: msm,virtio
     runs-on: ubuntu-24.04
     env:
       BUILD_DIR: build-android-aarch64-${{ matrix.kmd }}
       KMD: ${{ matrix.kmd }}
+      KMDS: ${{ matrix.kmds }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -63,7 +70,7 @@ jobs:
             -Dspirv-tools=disabled \
             -Dgallium-drivers= \
             -Dvulkan-drivers=freedreno \
-            -Dfreedreno-kmds=$KMD \
+            -Dfreedreno-kmds=$KMDS \
             -Dallow-fallback-for=libdrm \
             -Dlibarchive:openssl=disabled \
             -Dlibarchive:zlib=disabled \
