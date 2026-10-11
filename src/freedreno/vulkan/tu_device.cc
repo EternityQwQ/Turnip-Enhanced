@@ -1351,7 +1351,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
 
    props->apiVersion =
       tu_has_multiview(pdevice) ?
-         ((pdevice->info->chip >= 7) ? TU_API_VERSION :
+         ((pdevice->info->chip >= 6) ? TU_API_VERSION :
             VK_MAKE_VERSION(1, 3, VK_HEADER_VERSION))
          : VK_MAKE_VERSION(1, 0, VK_HEADER_VERSION);
    props->driverVersion = vk_get_driver_version();
