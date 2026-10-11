@@ -15,6 +15,7 @@
 #include "tu_knl.h"
 
 /* externally-synchronized BO suballocator. */
+#define TU_SUBALLOC_CACHED_BOS 4
 struct tu_suballocator
 {
    struct tu_device *dev;
@@ -26,8 +27,11 @@ struct tu_suballocator
    struct tu_bo *bo;
    uint32_t next_offset;
 
-   /** Optional BO cached for recycling as the next suballoc->bo, instead of having to allocate one. */
-   struct tu_bo *cached_bo;
+   /** Small MRU pool of recycled BOs instead of a single slot: with one
+    * slot a working set larger than default_size ping-pongs between
+    * alloc+free every time. Externally synchronized, no locking. */
+   struct tu_bo *cached_bos[TU_SUBALLOC_CACHED_BOS];
+   uint32_t cached_count;
 
    const char *name;
 };

@@ -1974,6 +1974,16 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
                                         &shader_application_cache_hit);
             if (!shaders[stage]) {
                cache_hit = false;
+               /* Partial hit would leak refs: compile below overwrites
+                * shaders[] without unref. Drop the hits we just took. */
+               for (mesa_shader_stage s = MESA_SHADER_VERTEX; s < stage;
+                    s = (mesa_shader_stage) (s + 1)) {
+                  if (shaders[s]) {
+                     vk_pipeline_cache_object_unref(&builder->device->vk,
+                                                    &shaders[s]->base);
+                     shaders[s] = NULL;
+                  }
+               }
                break;
             }
             application_cache_hit &= shader_application_cache_hit;

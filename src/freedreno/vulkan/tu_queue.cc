@@ -433,16 +433,23 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    if (TU_DEBUG(LOG_SKIP_GMEM_OPS))
       tu_dbg_log_gmem_load_store_skips(device);
 
-   pthread_mutex_lock(&device->submit_mutex);
-
    struct tu_cmd_buffer **cmd_buffers =
       (struct tu_cmd_buffer **) vk_submit->command_buffers;
    uint32_t cmdbuf_count = vk_submit->command_buffer_count;
 
+   /* Dynamic cmdbuf expansion does vk alloc/free + extra CS emit,
+    * no need to hold submit_mutex. Do it before taking the lock.
+    * Note: must return directly here, not goto fail_create_submit,
+    * as that would jump over the initializations below (ill-formed C++). */
    VkResult result =
       tu_insert_dynamic_cmdbufs(device, &cmd_buffers, &cmdbuf_count);
-   if (result != VK_SUCCESS)
+   if (result != VK_SUCCESS) {
+      if (cmd_buffers != (struct tu_cmd_buffer **) vk_submit->command_buffers)
+         vk_free(&queue->device->vk.alloc, cmd_buffers);
       return result;
+   }
+
+   pthread_mutex_lock(&device->submit_mutex);
 
    bool has_trace_points = false;
    static_assert(offsetof(struct tu_cmd_buffer, vk) == 0,
@@ -453,6 +460,10 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    }
 
    struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
+
+   /* Declared up here so the goto-based error paths below don't bypass
+    * its initialization (ill-formed C++); assigned after submit. */
+   uint32_t submission_id = 0;
 
    void *submit = tu_submit_create(device);
    if (!submit)
@@ -563,13 +574,21 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       goto out;
    }
 
+   /* Only submit_count + submission_id need the lock.
+    * Flush/stats are pure CPU work, do them unlocked. */
+   submission_id = device->submit_count++;
+   if (u_trace_submission_data) {
+      u_trace_submission_data->submission_id = submission_id;
+      u_trace_submission_data->queue = queue;
+      u_trace_submission_data->fence = queue->fence;
+   }
+
+   pthread_mutex_unlock(&device->submit_mutex);
+   pthread_cond_broadcast(&queue->device->timeline_cond);
+
    tu_debug_bos_print_stats(device);
 
    if (u_trace_submission_data) {
-      u_trace_submission_data->submission_id = device->submit_count;
-      u_trace_submission_data->queue = queue;
-      u_trace_submission_data->fence = queue->fence;
-
       for (uint32_t i = 0; i < u_trace_submission_data->cmd_buffer_count; i++) {
          bool free_data =
             i == u_trace_submission_data->last_buffer_with_tracepoints &&
@@ -585,11 +604,6 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
                        true);
       }
    }
-
-   device->submit_count++;
-
-   pthread_mutex_unlock(&device->submit_mutex);
-   pthread_cond_broadcast(&queue->device->timeline_cond);
 
    u_trace_context_process(&device->trace_context, false);
 

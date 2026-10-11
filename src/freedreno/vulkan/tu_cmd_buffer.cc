@@ -5652,6 +5652,11 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_pipeline, pipeline, _pipeline);
 
    if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
+      /* Same compute pipeline rebind is a no-op; skip re-emitting
+       * the shader state IB. */
+      if (cmd->state.last_compute_pipeline == pipeline)
+         return;
+      cmd->state.last_compute_pipeline = pipeline;
       cmd->state.shaders[MESA_SHADER_COMPUTE] =
          pipeline->shaders[MESA_SHADER_COMPUTE];
       tu_cs_emit_state_ib(&cmd->cs,
@@ -5661,6 +5666,12 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
    }
 
    assert(pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS);
+
+   /* Same graphics pipeline rebind is a no-op; skip the unconditional
+    * dirtying and program copy below. */
+   if (cmd->state.last_gfx_pipeline == pipeline)
+      return;
+   cmd->state.last_gfx_pipeline = pipeline;
 
    struct tu_graphics_pipeline *gfx_pipeline = tu_pipeline_to_graphics(pipeline);
    cmd->state.dirty |= TU_CMD_DIRTY_DESC_SETS | TU_CMD_DIRTY_SHADER_CONSTS |
@@ -10134,6 +10145,9 @@ tu_barrier(struct tu_cmd_buffer *cmd,
            const VkDependencyInfo *dep_infos,
            bool no_sync)
 {
+   /* Empty barrier is a no-op. Apps (esp. DXVK/vkd3d) emit these. */
+   if (dep_count == 0)
+      return;
    VkPipelineStageFlags2 srcStage = 0;
    VkPipelineStageFlags2 dstStage = 0;
    BITMASK_ENUM(tu_cmd_access_mask) src_flags = 0;
@@ -10249,6 +10263,13 @@ tu_barrier(struct tu_cmd_buffer *cmd,
          dstStage |= sanitized_dst_stage;
       }
    }
+
+   /* No-op barrier (all masks zero) - skip flush emission entirely.
+    * Note: src/dst_flags are BitmaskEnum, which has no operator==;
+    * test in boolean context like the rest of the driver does. */
+   if (!src_flags && !dst_flags &&
+       srcStage == 0 && dstStage == 0)
+      return;
 
    if (cmd->state.pass) {
       const VkPipelineStageFlags2 framebuffer_space_stages =
