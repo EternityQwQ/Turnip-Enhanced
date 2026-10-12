@@ -633,7 +633,8 @@ wait_for_available(struct tu_device *device, struct tu_query_pool *pool,
    uint64_t sleep_us = 50;
     /* os_time_get_nano() is a vDSO but still costs tens of nanoseconds and
      * pollutes branch prediction; recheck the deadline once per 64 polls
-     * instead of on every poll. */
+     * instead of on every poll. Device-lost is also polled there to fail
+     * fast instead of spinning the full 5s after a GPU hang. */
    uint64_t now = os_time_get_nano();
    while(now < abs_timeout) {
       if (query_is_available(slot))
@@ -646,15 +647,20 @@ wait_for_available(struct tu_device *device, struct tu_query_pool *pool,
 #elif defined(__aarch64__) || defined(__arm__)
          __asm__ volatile("yield" ::: "memory");
 #endif
-      } else if (spin < 1024) {
+      } else if (spin < 384) {
+         /* Short yield window only: long sched_yield storms (~768) burn
+          * CPU without progress on oversubscribed Android cores. */
          sched_yield();
       } else {
          os_time_sleep(sleep_us);
          if (sleep_us < 1000)
             sleep_us *= 2;
       }
-      if ((spin & 63) == 0)
+      if ((spin & 63) == 0) {
+         if (unlikely(vk_device_is_lost(&device->vk)))
+            return VK_ERROR_DEVICE_LOST;
          now = os_time_get_nano();
+      }
    }
    return vk_error(device, VK_TIMEOUT);
 }

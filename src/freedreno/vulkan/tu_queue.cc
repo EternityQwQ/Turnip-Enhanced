@@ -469,42 +469,16 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       }
    }
 
-    pthread_mutex_lock(&device->submit_mutex);
-
-    struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
-
-    /* Declared up here so the goto-based error paths below don't bypass
-    * its initialization (ill-formed C++); assigned after submit. */
-    uint32_t submission_id = 0;
-
-    /* Same rule as submission_id: this is assigned after the submit ioctl
-     * but must be declared before any goto that can reach past it. */
-    bool need_perfetto_refresh = false;
-
-   void *submit = tu_submit_create(device);
-   if (!submit)
-      goto fail_create_submit;
-
-   result = resolve_vis_stream_patchpoints(queue, submit, &dump_cmds,
-                                           cmd_buffers, cmdbuf_count);
-   if (result != VK_SUCCESS)
-      goto out;
-
-   result = resolve_cb_control_patchpoints(queue, submit, &dump_cmds,
-                                           cmd_buffers, cmdbuf_count);
-
-   if (result != VK_SUCCESS)
-      goto out;
-
-    if (has_trace_points) {
-       tu_u_trace_submission_data_create(
-          device, cmd_buffers, cmdbuf_count, &u_trace_submission_data);
+    /* submit object is private to this submission until tu_queue_submit,
+     * so create + reserve before taking submit_mutex to shrink the critical
+     * section. Only entry_count (stable after EndCommandBuffer) is read. */
+    void *submit = tu_submit_create(device);
+    if (!submit) {
+       if (cmd_buffers != (struct tu_cmd_buffer **) vk_submit->command_buffers)
+          vk_free(&queue->device->vk.alloc, cmd_buffers);
+       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
     }
 
-    /* Reserve backing storage for all entries up front, so appending the
-     * per-command-buffer entries below doesn't repeatedly grow/realloc.
-     * Autotune and timestamp entries are still unknown here and append
-     * afterwards. */
     {
        uint32_t total = 0;
        for (uint32_t i = 0; i < cmdbuf_count; i++) {
@@ -516,7 +490,35 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
           tu_submit_reserve_entries(device, submit, total);
     }
 
-    for (uint32_t i = 0; i < cmdbuf_count; i++) {
+     pthread_mutex_lock(&device->submit_mutex);
+
+     struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
+
+    /* Declared up here so the goto-based error paths below don't bypass
+    * its initialization (ill-formed C++); assigned after submit. */
+    uint32_t submission_id = 0;
+
+    /* Same rule as submission_id: this is assigned after the submit ioctl
+     * but must be declared before any goto that can reach past it. */
+    bool need_perfetto_refresh = false;
+
+    result = resolve_vis_stream_patchpoints(queue, submit, &dump_cmds,
+                                           cmd_buffers, cmdbuf_count);
+   if (result != VK_SUCCESS)
+      goto out;
+
+   result = resolve_cb_control_patchpoints(queue, submit, &dump_cmds,
+                                           cmd_buffers, cmdbuf_count);
+
+   if (result != VK_SUCCESS)
+      goto out;
+
+     if (has_trace_points) {
+        tu_u_trace_submission_data_create(
+           device, cmd_buffers, cmdbuf_count, &u_trace_submission_data);
+     }
+
+     for (uint32_t i = 0; i < cmdbuf_count; i++) {
       struct tu_cmd_buffer *cmd_buffer = cmd_buffers[i];
       struct tu_cs *cs = &cmd_buffer->cs;
 
@@ -652,14 +654,13 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 
    u_trace_context_process(&device->trace_context, false);
 
-out:
-   tu_submit_finish(device, submit);
+ out:
+    tu_submit_finish(device, submit);
 
-fail_create_submit:
-   if (cmd_buffers != (struct tu_cmd_buffer **) vk_submit->command_buffers)
-      vk_free(&queue->device->vk.alloc, cmd_buffers);
+    if (cmd_buffers != (struct tu_cmd_buffer **) vk_submit->command_buffers)
+       vk_free(&queue->device->vk.alloc, cmd_buffers);
 
-   return result;
+    return result;
 }
 
 VkResult

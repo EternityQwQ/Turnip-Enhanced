@@ -4931,12 +4931,17 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
    VK_FROM_HANDLE(tu_pipeline_layout, layout, info->layout);
    unsigned dyn_idx = 0;
 
-   struct tu_descriptor_state *descriptors_state =
-      tu_get_descriptors_state(cmd, bind_point);
+    struct tu_descriptor_state *descriptors_state =
+       tu_get_descriptors_state(cmd, bind_point);
 
-   descriptors_state->max_sets_bound =
-      MAX2(descriptors_state->max_sets_bound,
-           info->firstSet + info->descriptorSetCount);
+    descriptors_state->max_sets_bound =
+       MAX2(descriptors_state->max_sets_bound,
+            info->firstSet + info->descriptorSetCount);
+
+    /* Fast path: if all rebound sets have identical iova and carry no
+     * dynamic offsets / inline uniforms / SSBO emulation, the emit can be
+     * skipped entirely (DXVK/zink rebind same sets per draw). */
+    bool sets_changed = false;
 
    unsigned dynamic_offset_offset = 0;
    for (unsigned i = 0; i < info->firstSet; i++) {
@@ -4944,13 +4949,19 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
          dynamic_offset_offset += layout->set[i].layout->dynamic_offset_size;
    }
 
-   for (unsigned i = 0; i < info->descriptorSetCount; ++i) {
-      unsigned idx = i + info->firstSet;
-      VK_FROM_HANDLE(tu_descriptor_set, set, info->pDescriptorSets[i]);
+    for (unsigned i = 0; i < info->descriptorSetCount; ++i) {
+       unsigned idx = i + info->firstSet;
+       VK_FROM_HANDLE(tu_descriptor_set, set, info->pDescriptorSets[i]);
 
-      descriptors_state->sets[idx] = set;
-      descriptors_state->set_iova[idx] = set ?
-         (set->va | BINDLESS_DESCRIPTOR_64B) : 0;
+       uint64_t new_iova = set ? (set->va | BINDLESS_DESCRIPTOR_64B) : 0;
+       if (descriptors_state->set_iova[idx] != new_iova)
+          sets_changed = true;
+       descriptors_state->sets[idx] = set;
+       descriptors_state->set_iova[idx] = new_iova;
+
+       if (set && (set->layout->dynamic_offset_size ||
+                   set->layout->has_inline_uniforms))
+          sets_changed = true;
 
       if (cmd->device->physical_device->compiler_options.enable_ssbo_emulation)
          cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
@@ -5064,13 +5075,18 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
          return;
       }
 
-      memcpy(dynamic_desc_set.map, descriptors_state->dynamic_descriptors,
-             descriptors_state->max_dynamic_offset_size);
-      assert(reserved_set_idx >= 0); /* reserved set must be bound */
-      descriptors_state->set_iova[reserved_set_idx] = dynamic_desc_set.iova | BINDLESS_DESCRIPTOR_64B;
-   }
+       memcpy(dynamic_desc_set.map, descriptors_state->dynamic_descriptors,
+              descriptors_state->max_dynamic_offset_size);
+       assert(reserved_set_idx >= 0); /* reserved set must be bound */
+       descriptors_state->set_iova[reserved_set_idx] = dynamic_desc_set.iova | BINDLESS_DESCRIPTOR_64B;
+       sets_changed = true;
+    }
 
-   tu_dirty_desc_sets(cmd, bind_point);
+    if (!sets_changed &&
+        !cmd->device->physical_device->compiler_options.enable_ssbo_emulation)
+       return;
+
+    tu_dirty_desc_sets(cmd, bind_point);
 }
 
 template <chip CHIP>
@@ -8956,12 +8972,29 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
 static uint32_t
 tu_draw_initiator(struct tu_cmd_buffer *cmd, enum pc_di_src_sel src_sel)
 {
-   enum pc_di_primtype primtype =
-      tu6_primtype((VkPrimitiveTopology)cmd->vk.dynamic_graphics_state.ia.primitive_topology);
+   /* Fast path: pack varying inputs into a small key, hit reuses u32. */
+   uint32_t topo = cmd->vk.dynamic_graphics_state.ia.primitive_topology;
+   uint32_t patch = cmd->vk.dynamic_graphics_state.ts.patch_control_points;
+   uint32_t idx_size = cmd->state.index_size;
+   bool has_gs = cmd->state.shaders[MESA_SHADER_GEOMETRY]->variant != NULL;
+   const struct tu_shader *tes = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
+   uint32_t tess = tes->variant ? tes->variant->key.tessellation : 0;
+   uint32_t key0 = (topo << 8) | (patch & 0xff);
+   uint32_t key1 = (idx_size << 16) | (has_gs ? 0x8000u : 0) | (tess & 0xff);
+   uint32_t key2 = (uint32_t) src_sel;
+   /* variant pointers disambiguate same tess enum from different shaders. */
+   uint32_t key3 = (uint32_t)(uintptr_t) tes->variant ^ (uint32_t)(uintptr_t)cmd->state.shaders[MESA_SHADER_GEOMETRY]->variant;
+   if (cmd->state.has_last_initiator &&
+       cmd->state.last_initiator_key[0] == key0 &&
+       cmd->state.last_initiator_key[1] == key1 &&
+       cmd->state.last_initiator_key[2] == key2 &&
+       cmd->state.last_initiator_key[3] == key3)
+      return cmd->state.last_initiator;
 
+   enum pc_di_primtype primtype =
+      tu6_primtype((VkPrimitiveTopology)topo);
    if (primtype == DI_PT_PATCHES0)
-      primtype = (enum pc_di_primtype) (primtype +
-                                        cmd->vk.dynamic_graphics_state.ts.patch_control_points);
+      primtype = (enum pc_di_primtype)(primtype + patch);
 
    uint32_t initiator =
       CP_DRAW_INDX_OFFSET_0_PRIM_TYPE(primtype) |
@@ -8969,10 +9002,9 @@ tu_draw_initiator(struct tu_cmd_buffer *cmd, enum pc_di_src_sel src_sel)
       CP_DRAW_INDX_OFFSET_0_INDEX_SIZE((enum a4xx_index_size) cmd->state.index_size) |
       CP_DRAW_INDX_OFFSET_0_VIS_CULL(USE_VISIBILITY);
 
-   if (cmd->state.shaders[MESA_SHADER_GEOMETRY]->variant)
+   if (has_gs)
       initiator |= CP_DRAW_INDX_OFFSET_0_GS_ENABLE;
 
-   const struct tu_shader *tes = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
    if (tes->variant) {
       switch (tes->variant->key.tessellation) {
       case IR3_TESS_TRIANGLES:
@@ -8989,6 +9021,12 @@ tu_draw_initiator(struct tu_cmd_buffer *cmd, enum pc_di_src_sel src_sel)
          break;
       }
    }
+   cmd->state.last_initiator = initiator;
+   cmd->state.last_initiator_key[0] = key0;
+   cmd->state.last_initiator_key[1] = key1;
+   cmd->state.last_initiator_key[2] = key2;
+   cmd->state.last_initiator_key[3] = key3;
+   cmd->state.has_last_initiator = true;
    return initiator;
 }
 
