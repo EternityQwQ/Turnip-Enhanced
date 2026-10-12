@@ -8982,8 +8982,11 @@ tu_draw_initiator(struct tu_cmd_buffer *cmd, enum pc_di_src_sel src_sel)
    uint32_t key0 = (topo << 8) | (patch & 0xff);
    uint32_t key1 = (idx_size << 16) | (has_gs ? 0x8000u : 0) | (tess & 0xff);
    uint32_t key2 = (uint32_t) src_sel;
-   /* variant pointers disambiguate same tess enum from different shaders. */
-   uint32_t key3 = (uint32_t)(uintptr_t) tes->variant ^ (uint32_t)(uintptr_t)cmd->state.shaders[MESA_SHADER_GEOMETRY]->variant;
+   /* Fold both variant pointers fully (64-bit) to disambiguate same tess
+    * enum from different shaders without truncation collisions. */
+   uintptr_t pv = (uintptr_t) tes->variant;
+   uintptr_t gv = (uintptr_t) cmd->state.shaders[MESA_SHADER_GEOMETRY]->variant;
+   uint32_t key3 = (uint32_t)(pv ^ (pv >> 32) ^ gv ^ (gv >> 32));
    if (cmd->state.has_last_initiator &&
        cmd->state.last_initiator_key[0] == key0 &&
        cmd->state.last_initiator_key[1] == key1 &&

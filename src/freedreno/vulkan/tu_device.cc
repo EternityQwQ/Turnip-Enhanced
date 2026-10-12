@@ -5206,16 +5206,28 @@ tu_debug_bos_print_stats(struct tu_device *dev)
 
    mtx_lock(&dev->bo_mutex);
 
-   /* Snapshot pointers under the lock, then sort/log unlocked so submits
-    * never queue behind qsort+IO. Entries are device-lifetime (never freed
-    * while bo_sizes exists), so raw pointers stay valid after unlock. */
+   /* Snapshot copies under the lock, then sort/log unlocked so submits
+    * never queue behind qsort+IO. Entries can be freed by concurrent
+    * tu_debug_bos_del (count->0) once we unlock, so copy count/size and
+    * strdup the name instead of holding raw pointers (UAF). */
    struct util_dynarray dyn = UTIL_DYNARRAY_INIT;
 
    hash_table_foreach(dev->bo_sizes, entry)
    {
       struct tu_debug_bos_entry *debug_bos =
          (struct tu_debug_bos_entry *) entry->data;
-      util_dynarray_append(&dyn, debug_bos);
+      struct tu_debug_bos_entry *copy =
+         (struct tu_debug_bos_entry *) malloc(sizeof(*copy));
+      if (!copy)
+         continue;
+      copy->count = debug_bos->count;
+      copy->size = debug_bos->size;
+      copy->name = debug_bos->name ? strdup(debug_bos->name) : NULL;
+      if (debug_bos->name && !copy->name) {
+         free(copy);
+         continue;
+      }
+      util_dynarray_append(&dyn, copy);
    }
 
    mtx_unlock(&dev->bo_mutex);
@@ -5241,6 +5253,11 @@ tu_debug_bos_print_stats(struct tu_device *dev)
 
    mesa_logi("submitted %d bos (%d MB)\n", count, DIV_ROUND_UP(size, 1024));
 
+   util_dynarray_foreach(&dyn, struct tu_debug_bos_entry *, entryp)
+   {
+      free((void *) (*entryp)->name);
+      free(*entryp);
+   }
    util_dynarray_fini(&dyn);
 }
 

@@ -534,10 +534,6 @@ struct tu_cmd_state
     uint32_t last_initiator;
     uint32_t last_initiator_key[4];
     bool has_last_initiator;
-    /* LRZ+depth_plane fingerprint to skip draw_state rebuild on hit. */
-    uint64_t last_lrz_key;
-    uint32_t last_lrz_cntl;
-    bool has_last_lrz;
 
    struct tu_draw_state vs_params;
    struct tu_draw_state fs_params;
