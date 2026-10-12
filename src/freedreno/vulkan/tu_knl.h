@@ -154,9 +154,13 @@ struct tu_knl {
                           void *metadata, uint32_t metadata_size);
    void *(*submit_create)(struct tu_device *device);
    void (*submit_finish)(struct tu_device *device, void *_submit);
-   void (*submit_add_entries)(struct tu_device *device, void *_submit,
-                              struct tu_cs_entry *entries,
-                              unsigned num_entries);
+    void (*submit_add_entries)(struct tu_device *device, void *_submit,
+                               struct tu_cs_entry *entries,
+                               unsigned num_entries);
+    /* Optional reserve hook to avoid repeated grow/realloc on big submits.
+     * May be NULL; the core wrapper treats NULL as a no-op. */
+    void (*submit_reserve_entries)(struct tu_device *device, void *_submit,
+                                   unsigned num_entries);
    void (*submit_add_bind)(struct tu_device *device,
                            void *_submit,
                            struct tu_sparse_vma *vma, uint64_t vma_offset,
@@ -321,6 +325,10 @@ void
 tu_submit_add_entries(struct tu_device *dev, void *submit,
                       struct tu_cs_entry *entries,
                       unsigned num_entries);
+
+void
+tu_submit_reserve_entries(struct tu_device *dev, void *submit,
+                          unsigned num_entries);
 
 void
 tu_submit_add_bind(struct tu_device *device,

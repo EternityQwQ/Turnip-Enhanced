@@ -38,6 +38,8 @@ void msm_submit_finish(struct tu_device *device, void *_submit);
 void msm_submit_add_entries(struct tu_device *device, void *_submit,
                             struct tu_cs_entry *entries,
                             unsigned num_entries);
+void msm_submit_reserve_entries(struct tu_device *device, void *_submit,
+                                unsigned num_entries);
 void msm_submit_add_bind(struct tu_device *device,
                          void *_submit,
                          struct tu_sparse_vma *vma, uint64_t vma_offset,
