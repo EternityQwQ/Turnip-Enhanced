@@ -1214,6 +1214,7 @@ static const struct tu_knl virtio_knl_funcs = {
       .submit_create = msm_submit_create,
       .submit_finish = msm_submit_finish,
       .submit_add_entries = msm_submit_add_entries,
+      .submit_reserve_entries = msm_submit_reserve_entries,
       .queue_submit = virtio_queue_submit,
       .queue_wait_fence = virtio_queue_wait_fence,
       .sparse_vma_init = virtio_sparse_vma_init,
