@@ -2291,6 +2291,7 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
      * the stack to avoid vk_alloc/vk_free per traced submit. No heap
      * path: obj_count cannot exceed 1, so no OOM goto that would cross
      * the initializations below (ill-formed C++, see e3ea98b4). */
+    assert(obj_count <= 1);
     struct kgsl_command_object stack_obj;
     struct kgsl_command_object *objs = obj_count ? &stack_obj : NULL;
 
