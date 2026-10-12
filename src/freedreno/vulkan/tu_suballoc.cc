@@ -36,6 +36,7 @@ tu_bo_suballocator_init(struct tu_suballocator *suballoc,
    suballoc->flags = flags;
    suballoc->bo = NULL;
    suballoc->cached_count = 0;
+   suballoc->cached_bytes = 0;
    suballoc->name = name;
 }
 
@@ -47,6 +48,7 @@ tu_bo_suballocator_finish(struct tu_suballocator *suballoc)
    for (uint32_t i = 0; i < suballoc->cached_count; i++)
       tu_bo_finish(suballoc->dev, suballoc->cached_bos[i]);
    suballoc->cached_count = 0;
+   suballoc->cached_bytes = 0;
 }
 
 VkResult
@@ -72,36 +74,34 @@ tu_suballoc_bo_alloc(struct tu_suballoc_bo *suballoc_bo,
 
    uint32_t alloc_size = MAX2(size, suballoc->default_size);
 
-   /* Reuse the smallest recycled BO that fits (best-fit over tiny MRU pool),
-    * freeing the rest lazily. Old code had a single slot: a large allocation
-    * evicted it even when the working set needed both sizes. */
+   /* Single-pass best-fit over the tiny pool: find the smallest recycled
+    * BO that fits and remember the smallest overall for eviction, all in
+    * one scan. A single-slot cache would ping-pong between alloc+free
+    * whenever the working set needs two sizes. */
    if (suballoc->cached_count) {
-      uint32_t best = UINT32_MAX;
+      int best_idx = -1;
+      uint32_t best_size = UINT32_MAX;
+      uint32_t smallest_idx = 0;
       for (uint32_t i = 0; i < suballoc->cached_count; i++) {
-         if (suballoc->cached_bos[i]->size >= alloc_size &&
-             suballoc->cached_bos[i]->size < best)
-            best = suballoc->cached_bos[i]->size;
-      }
-      if (best != UINT32_MAX) {
-         for (uint32_t i = 0; i < suballoc->cached_count; i++) {
-            if (suballoc->cached_bos[i]->size == best) {
-               suballoc->bo = suballoc->cached_bos[i];
-               suballoc->cached_bos[i] =
-                  suballoc->cached_bos[--suballoc->cached_count];
-               break;
-            }
+         uint32_t sz = suballoc->cached_bos[i]->size;
+         if (sz < suballoc->cached_bos[smallest_idx]->size)
+            smallest_idx = i;
+         if (sz >= alloc_size && sz < best_size) {
+            best_size = sz;
+            best_idx = i;
          }
+      }
+      if (best_idx >= 0) {
+         suballoc->bo = suballoc->cached_bos[best_idx];
+         suballoc->cached_bytes -= suballoc->bo->size;
+         suballoc->cached_bos[best_idx] =
+            suballoc->cached_bos[--suballoc->cached_count];
       } else if (suballoc->cached_count == TU_SUBALLOC_CACHED_BOS) {
          /* Pool full and nothing fits: drop the smallest to make room. */
-         uint32_t smallest = 0;
-         for (uint32_t i = 1; i < suballoc->cached_count; i++) {
-            if (suballoc->cached_bos[i]->size <
-                suballoc->cached_bos[smallest]->size)
-               smallest = i;
-         }
-         if (suballoc->cached_bos[smallest]->size < alloc_size) {
-            tu_bo_finish(suballoc->dev, suballoc->cached_bos[smallest]);
-            suballoc->cached_bos[smallest] =
+         if (suballoc->cached_bos[smallest_idx]->size < alloc_size) {
+            suballoc->cached_bytes -= suballoc->cached_bos[smallest_idx]->size;
+            tu_bo_finish(suballoc->dev, suballoc->cached_bos[smallest_idx]);
+            suballoc->cached_bos[smallest_idx] =
                suballoc->cached_bos[--suballoc->cached_count];
          }
       }
@@ -137,9 +137,14 @@ tu_suballoc_bo_free(struct tu_suballocator *suballoc, struct tu_suballoc_bo *bo)
       return;
 
    /* If we held the last reference to this BO, recycle it into the MRU
-    * pool for the next allocation instead of freeing it. */
+    * pool for the next allocation instead of freeing it. Pooled bytes are
+    * capped at 4x default_size, so a transient peak (e.g. a megabyte spike
+    * in the pipeline suballocator) doesn't pin memory forever. */
    if (p_atomic_read(&bo->bo->refcnt) == 1 &&
-       suballoc->cached_count < TU_SUBALLOC_CACHED_BOS) {
+       suballoc->cached_count < TU_SUBALLOC_CACHED_BOS &&
+       suballoc->cached_bytes + bo->bo->size <=
+          (uint64_t)suballoc->default_size * 4) {
+      suballoc->cached_bytes += bo->bo->size;
       suballoc->cached_bos[suballoc->cached_count++] = bo->bo;
       return;
    }

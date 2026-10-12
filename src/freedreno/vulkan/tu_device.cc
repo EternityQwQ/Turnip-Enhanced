@@ -3430,8 +3430,9 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    u_rwlock_init(&device->dma_bo_lock);
    u_rwlock_init(&device->vm_bind_fence_lock);
-   pthread_mutex_init(&device->submit_mutex, NULL);
-   device->vm_bind_fence_fd = -1;
+    pthread_mutex_init(&device->submit_mutex, NULL);
+    device->timeline_waiters = 0;
+    device->vm_bind_fence_fd = -1;
 
    if (physical_device->has_set_iova) {
       mtx_init(&device->vma_mutex, mtx_plain);
@@ -3567,9 +3568,11 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                               "kgsl_profiling_suballoc");
    }
 
-   tu_bo_suballocator_init(&device->event_suballoc, device,
-      getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
-      "event_suballoc");
+    /* 4 pages hold 256 events per BO: fewer suballoc GEM_NEW calls and
+     * less event_mutex contention on event-heavy titles. */
+    tu_bo_suballocator_init(&device->event_suballoc, device,
+       4 * getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
+       "event_suballoc");
 
    tu_bo_suballocator_init(
       &device->vis_stream_suballocator, device,
@@ -5193,6 +5196,13 @@ tu_debug_bos_print_stats(struct tu_device *dev)
    if (likely(!dev->bo_sizes))
       return;
 
+   /* Throttle to roughly one dump per 600 submits: the full hash walk +
+    * qsort + log on every submit would contend on bo_mutex with the submit
+    * path. The counter is best-effort only, hence relaxed atomics. */
+   static uint32_t print_counter;
+   if ((__atomic_add_fetch(&print_counter, 1, __ATOMIC_RELAXED) % 600) != 1)
+      return;
+
    mtx_lock(&dev->bo_mutex);
 
    /* Put the HT's sizes data in an array so we can sort by number of allocations. */
@@ -5211,7 +5221,7 @@ tu_debug_bos_print_stats(struct tu_device *dev)
 
    qsort(dyn.data,
          util_dynarray_num_elements(&dyn, struct tu_debug_bos_entry *),
-         sizeof(struct tu_debug_bos_entryos_entry *), debug_bos_count_compare);
+         sizeof(struct tu_debug_bos_entry *), debug_bos_count_compare);
 
    util_dynarray_foreach(&dyn, struct tu_debug_bos_entry *, entryp)
    {

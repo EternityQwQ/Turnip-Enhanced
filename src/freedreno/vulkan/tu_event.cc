@@ -40,7 +40,8 @@ tu_CreateEvent(VkDevice _device,
    if (result != VK_SUCCESS)
       goto fail_alloc;
 
-   *tu_event_map(event) = 0;
+    /* Use an atomic store for the same reason as Set/Reset below. */
+    p_atomic_set(tu_event_map(event), 0);
 
    TU_RMV(event_create, device, pCreateInfo, event);
 
@@ -93,7 +94,10 @@ VKAPI_ATTR VkResult VKAPI_CALL
 tu_SetEvent(VkDevice _device, VkEvent _event)
 {
    VK_FROM_HANDLE(tu_event, event, _event);
-   *tu_event_map(event) = 1;
+   /* Pair with the acquire load in GetEventStatus: a plain store could
+    * stay invisible too long under ARM's weak ordering; release semantics
+    * cost the same. */
+   p_atomic_set(tu_event_map(event), 1);
 
    return VK_SUCCESS;
 }
@@ -102,7 +106,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 tu_ResetEvent(VkDevice _device, VkEvent _event)
 {
    VK_FROM_HANDLE(tu_event, event, _event);
-   *tu_event_map(event) = 0;
+   p_atomic_set(tu_event_map(event), 0);
 
    return VK_SUCCESS;
 }

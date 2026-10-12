@@ -308,6 +308,14 @@ tu_submit_add_entries(struct tu_device *dev, void *submit,
 }
 
 void
+tu_submit_reserve_entries(struct tu_device *dev, void *submit,
+                          unsigned num_entries)
+{
+   if (dev->instance->knl->submit_reserve_entries)
+      dev->instance->knl->submit_reserve_entries(dev, submit, num_entries);
+}
+
+void
 tu_submit_add_bind(struct tu_device *dev,
                    void *_submit,
                    struct tu_sparse_vma *vma, uint64_t vma_offset,

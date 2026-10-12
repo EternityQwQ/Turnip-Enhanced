@@ -143,19 +143,49 @@ msm_submit_add_entries(struct tu_device *device, void *_submit,
       util_dynarray_grow(&submit->command_bos, struct tu_bo *,
                          num_entries);
 
-   for (unsigned i = 0; i < num_entries; i++) {
-      cmds[i].type = MSM_SUBMIT_CMD_BUF;
-      cmds[i].submit_idx = has_vm_bind ? 0 : entries[i].bo->submit_bo_list_idx;
-      cmds[i].submit_offset = has_vm_bind ? 0 : entries[i].offset;
-      cmds[i].size = entries[i].size;
-      cmds[i].pad = 0;
-      cmds[i].nr_relocs = 0;
-      if (has_vm_bind)
+   if (has_vm_bind) {
+      /* The vm_bind (iova) path fills submit_idx with 0 and needs no
+       * per-entry fixup under the lock; keep the branches hoisted so each
+       * loop stays branch-free. */
+      for (unsigned i = 0; i < num_entries; i++) {
+         cmds[i].type = MSM_SUBMIT_CMD_BUF;
+         cmds[i].submit_idx = 0;
+         cmds[i].submit_offset = 0;
+         cmds[i].size = entries[i].size;
+         cmds[i].pad = 0;
+         cmds[i].nr_relocs = 0;
          cmds[i].iova = entries[i].bo->iova + entries[i].offset;
-      else
+         bos[i] = entries[i].bo;
+      }
+   } else {
+      for (unsigned i = 0; i < num_entries; i++) {
+         cmds[i].type = MSM_SUBMIT_CMD_BUF;
+         cmds[i].submit_idx = entries[i].bo->submit_bo_list_idx;
+         cmds[i].submit_offset = entries[i].offset;
+         cmds[i].size = entries[i].size;
+         cmds[i].pad = 0;
+         cmds[i].nr_relocs = 0;
          cmds[i].relocs = 0;
-      bos[i] = entries[i].bo;
+         bos[i] = entries[i].bo;
+      }
    }
+}
+
+void
+msm_submit_reserve_entries(struct tu_device *device, void *_submit,
+                           unsigned num_entries)
+{
+   struct tu_msm_queue_submit *submit =
+      (struct tu_msm_queue_submit *)_submit;
+   if (!num_entries)
+      return;
+   /* Best-effort capacity hint only: failure just means a later grow
+    * handles it, so the returned pointers are intentionally unused. */
+   (void) util_dynarray_grow(&submit->commands, struct drm_msm_gem_submit_cmd,
+                             num_entries);
+   submit->commands.size -= num_entries * sizeof(struct drm_msm_gem_submit_cmd);
+   (void) util_dynarray_grow(&submit->command_bos, struct tu_bo *, num_entries);
+   submit->command_bos.size -= num_entries * sizeof(struct tu_bo *);
 }
 
 void

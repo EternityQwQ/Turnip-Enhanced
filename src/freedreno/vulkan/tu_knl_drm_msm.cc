@@ -944,8 +944,10 @@ msm_bo_init(struct tu_device *dev,
       memset(bo, 0, sizeof(*bo));
    }
 
-   /* We don't use bo->name here because for the !TU_DEBUG=bo case bo->name is NULL. */
-   tu_bo_set_kernel_name(dev, bo, name);
+    /* SET_NAME is a debug-only ioctl: skip it unless BO names are actually
+     * tracked (TU_DEBUG=bos). Saves one ioctl per BO allocation. */
+    if (unlikely(dev->bo_sizes))
+       tu_bo_set_kernel_name(dev, bo, name);
 
    if (result == VK_SUCCESS &&
        (mem_property & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&
@@ -1135,13 +1137,23 @@ msm_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       return;
    }
 
+   /* munmap is pure CPU/TLB work: do it outside the dma lock so freeing a
+    * BO never blocks dma-buf imports (which need the write lock) on
+    * multi-threaded titles. */
+   void *map = bo->map;
+   uint64_t unmap_size = bo->size;
+   bo->map = NULL;
+   u_rwlock_rdunlock(&dev->dma_bo_lock);
+
+   if (map) {
+      TU_RMV(bo_unmap, dev, bo);
+      munmap(map, unmap_size);
+   }
+
+   u_rwlock_rdlock(&dev->dma_bo_lock);
+
    tu_debug_bos_del(dev, bo);
    tu_dump_bo_del(dev, bo);
-
-   if (bo->map) {
-      TU_RMV(bo_unmap, dev, bo);
-      munmap(bo->map, bo->size);
-   }
 
    TU_RMV(bo_destroy, dev, bo);
 
@@ -1411,9 +1423,14 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
 
             uint32_t flags = 0;
 
+            /* Snapshot the fence state under the read lock and run the
+             * ioctls below on the copy, so slow submits never block
+             * vm_bind mappers (which need the write lock). */
             u_rwlock_rdlock(&queue->device->vm_bind_fence_lock);
+            int fence_fd = queue->device->vm_bind_fence_fd;
+            u_rwlock_rdunlock(&queue->device->vm_bind_fence_lock);
 
-            if (queue->device->vm_bind_fence_fd != -1)
+            if (fence_fd != -1)
                flags |= MSM_VM_BIND_FENCE_FD_IN;
 
             util_dynarray_foreach (&submit->binds, struct drm_msm_vm_bind_op,
@@ -1424,7 +1441,7 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
                struct drm_msm_vm_bind req = {
                   .flags = flags,
                   .nr_ops = 1,
-                  .fence_fd = queue->device->vm_bind_fence_fd,
+                  .fence_fd = fence_fd,
                   .queue_id = queue->sparse_queue_id,
                   .in_syncobjs =
                      (uint64_t)(uintptr_t)&in_syncobjs[wait_count],
@@ -1444,23 +1461,24 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
                                           &req, sizeof(req));
                }
 
-               if (ret)
-                  break;
+                if (ret)
+                   break;
             }
-
-            u_rwlock_rdunlock(&queue->device->vm_bind_fence_lock);
-         }
-      }
+          }
+       }
    } else {
       uint32_t flags = MSM_PIPE_3D0;
 
       if (wait_count || extra_wait_count)
          flags |= MSM_SUBMIT_SYNCOBJ_IN;
 
-      if (signal_count || extra_signal_count)
-         flags |= MSM_SUBMIT_SYNCOBJ_OUT;
+       if (signal_count || extra_signal_count)
+          flags |= MSM_SUBMIT_SYNCOBJ_OUT;
 
-      if (has_vm_bind) {
+       /* Snapshotted fence fd, declared here so the submit request built
+        * below can use it. */
+       int vm_bind_fence_fd = -1;
+       if (has_vm_bind) {
          if (extra_wait_count) {
             in_syncobjs[wait_count] = (struct drm_msm_syncobj) {
                .handle = queue->sparse_syncobj,
@@ -1468,18 +1486,24 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
                .point = queue->sparse_timepoint,
             };
          }
-         if (extra_signal_count) {
-            out_syncobjs[signal_count] = (struct drm_msm_syncobj) {
-               .handle = queue->gfx_syncobj,
-               .flags = 0,
-               .point = ++queue->gfx_timepoint,
-            };
-         }
+          if (extra_signal_count) {
+             out_syncobjs[signal_count] = (struct drm_msm_syncobj) {
+                .handle = queue->gfx_syncobj,
+                .flags = 0,
+                .point = ++queue->gfx_timepoint,
+             };
+          }
 
-         u_rwlock_rdlock(&queue->device->vm_bind_fence_lock);
+           /* Snapshot the fence fd and release the read lock before the
+            * blocking ioctl below, so vm_bind mappers (which need the
+            * write lock) never queue behind submits. The iova path needs
+            * no submit_idx fixup. */
+           u_rwlock_rdlock(&queue->device->vm_bind_fence_lock);
+           vm_bind_fence_fd = queue->device->vm_bind_fence_fd;
+           u_rwlock_rdunlock(&queue->device->vm_bind_fence_lock);
 
-         if (queue->device->vm_bind_fence_fd != -1)
-            flags |= MSM_SUBMIT_FENCE_FD_IN;
+           if (vm_bind_fence_fd != -1)
+              flags |= MSM_SUBMIT_FENCE_FD_IN;
       } else {
          mtx_lock(&queue->device->bo_mutex);
 
@@ -1519,32 +1543,34 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
          }
       }
 
-      struct drm_msm_gem_submit req = {
-         .flags = flags,
-         .nr_bos = entry_count ? queue->device->submit_bo_count : 0,
-         .nr_cmds = entry_count,
-         .bos = (uint64_t)(uintptr_t) queue->device->submit_bo_list,
-         .cmds = (uint64_t)(uintptr_t)submit->commands.data,
-         .fence_fd = queue->device->vm_bind_fence_fd,
-         .queueid = queue->msm_queue_id,
-         .in_syncobjs = (uint64_t)(uintptr_t)in_syncobjs,
-         .out_syncobjs = (uint64_t)(uintptr_t)out_syncobjs,
-         .nr_in_syncobjs = wait_count + extra_wait_count,
-         .nr_out_syncobjs = signal_count + extra_signal_count,
-         .syncobj_stride = sizeof(struct drm_msm_syncobj),
-      };
+       struct drm_msm_gem_submit req = {
+          .flags = flags,
+          .nr_bos = entry_count ? queue->device->submit_bo_count : 0,
+          .nr_cmds = entry_count,
+          .bos = (uint64_t)(uintptr_t) queue->device->submit_bo_list,
+          .cmds = (uint64_t)(uintptr_t)submit->commands.data,
+          .fence_fd = has_vm_bind ? vm_bind_fence_fd
+                                  : queue->device->vm_bind_fence_fd,
+          .queueid = queue->msm_queue_id,
+          .in_syncobjs = (uint64_t)(uintptr_t)in_syncobjs,
+          .out_syncobjs = (uint64_t)(uintptr_t)out_syncobjs,
+          .nr_in_syncobjs = wait_count + extra_wait_count,
+          .nr_out_syncobjs = signal_count + extra_signal_count,
+          .syncobj_stride = sizeof(struct drm_msm_syncobj),
+       };
 
-      {
-         MESA_TRACE_SCOPE("DRM_MSM_GEM_SUBMIT");
-         ret = drmCommandWriteRead(queue->device->fd,
-                                 DRM_MSM_GEM_SUBMIT,
-                                 &req, sizeof(req));
-      }
+       {
+          MESA_TRACE_SCOPE("DRM_MSM_GEM_SUBMIT");
+          ret = drmCommandWriteRead(queue->device->fd,
+                                  DRM_MSM_GEM_SUBMIT,
+                                  &req, sizeof(req));
+       }
 
-      if (has_vm_bind)
-         u_rwlock_rdunlock(&queue->device->vm_bind_fence_lock);
-      else
-         mtx_unlock(&queue->device->bo_mutex);
+       /* The vm_bind path is already unlocked before the ioctl; the legacy
+        * path still needs bo_mutex held across it to keep submit_bo_list
+        * stable. */
+       if (!has_vm_bind)
+          mtx_unlock(&queue->device->bo_mutex);
 
       fence = req.fence;
    }
@@ -1598,6 +1624,7 @@ static const struct tu_knl msm_knl_funcs = {
       .submit_create = msm_submit_create,
       .submit_finish = msm_submit_finish,
       .submit_add_entries = msm_submit_add_entries,
+      .submit_reserve_entries = msm_submit_reserve_entries,
       .submit_add_bind = msm_submit_add_bind,
       .queue_submit = msm_queue_submit,
       .queue_wait_fence = msm_queue_wait_fence,

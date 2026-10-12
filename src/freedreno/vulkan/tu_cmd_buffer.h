@@ -507,13 +507,28 @@ struct tu_cmd_state
    bool fdm_per_layer;
 
    /* saved states to re-emit in TU_CMD_DIRTY_DRAW_STATE case */
-   struct tu_draw_state dynamic_state[TU_DYNAMIC_STATE_COUNT];
-   struct tu_draw_state vertex_buffers;
-   struct tu_draw_state shader_const;
-   struct tu_draw_state desc_sets;
-   struct tu_draw_state load_state;
-   struct tu_draw_state compute_load_state;
-   struct tu_draw_state prim_order_gmem;
+    struct tu_draw_state dynamic_state[TU_DYNAMIC_STATE_COUNT];
+    struct tu_draw_state vertex_buffers;
+    struct tu_draw_state shader_const;
+    struct tu_draw_state desc_sets;
+    struct tu_draw_state load_state;
+    struct tu_draw_state compute_load_state;
+    struct tu_draw_state prim_order_gmem;
+    /* Compute constants cache. The graphics path uses shader_const, so
+     * compute keeps its own copy to avoid clobbering it in mixed
+     * graphics+compute command buffers. */
+    struct tu_draw_state compute_const;
+    bool compute_const_valid;
+    uint32_t compute_const_push_version;
+    /* Push-constant version, bumped on every real content change. Compute
+     * dispatches observe it without consuming the shared SHADER_CONSTS
+     * dirty bit, which the graphics path owns. */
+    uint32_t push_version;
+    /* Last direct-dispatch grid size and driver-params IB, to skip
+     * rebuilding them when consecutive dispatches match. */
+    uint32_t last_cs_blocks[3];
+    bool has_last_cs_blocks;
+    uint64_t last_cs_driver_iova;
 
    struct tu_draw_state vs_params;
    struct tu_draw_state fs_params;

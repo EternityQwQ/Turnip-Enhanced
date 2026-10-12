@@ -453,10 +453,15 @@ struct tu_device
    VkCommandPool dynamic_rendering_pool;
    uint32_t dynamic_rendering_fence;
 
-   /* Condition variable for timeline semaphore to notify waiters when a
+    /* Condition variable for timeline semaphore to notify waiters when a
     * new submit is executed. */
-   pthread_cond_t timeline_cond;
-   pthread_mutex_t submit_mutex;
+    pthread_cond_t timeline_cond;
+    pthread_mutex_t submit_mutex;
+    /* Number of threads currently waiting on timeline_cond. Lets
+     * submitters skip the broadcast when nobody is waiting (the MSM
+     * backend never waits here). Plain int, always accessed with
+     * __atomic builtins, no extra header needed. */
+    int timeline_waiters;
 
    struct fd_perfcntr_state *perfcntrs;
 

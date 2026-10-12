@@ -628,16 +628,32 @@ tu_cs_emit_debug_magic_strv(struct tu_cs *cs,
                             const char *fmt,
                             va_list args)
 {
-   int fmt_len = vsnprintf(NULL, 0, fmt, args);
+   /* Small markers fit on the stack; fall back to the heap for long ones.
+    * Note the va_list is consumed by the first vsnprintf, so the length
+    * probe must use a copy. */
+   char stack_buf[256];
+   va_list copy;
+   va_copy(copy, args);
+   int fmt_len = vsnprintf(NULL, 0, fmt, copy);
+   va_end(copy);
+   if (fmt_len < 0)
+      return;
    int len = 4 + fmt_len + 1;
-   char *string = (char *) malloc(len);
+   char *string = stack_buf;
+   char *heap = NULL;
+   if ((size_t)len > sizeof(stack_buf)) {
+      heap = (char *) malloc(len);
+      if (!heap)
+         return;
+      string = heap;
+   }
 
    /* format: <magic><formatted string>\0 */
    *(uint32_t *) string = magic;
    vsnprintf(string + 4, fmt_len + 1, fmt, args);
 
    tu_cs_emit_debug_string(cs, string, len);
-   free(string);
+   free(heap);
 }
 
 __attribute__((format(printf, 2, 3))) void

@@ -631,7 +631,11 @@ wait_for_available(struct tu_device *device, struct tu_query_pool *pool,
          WAIT_TIMEOUT * NSEC_PER_SEC);
    uint32_t spin = 0;
    uint64_t sleep_us = 50;
-   while(os_time_get_nano() < abs_timeout) {
+    /* os_time_get_nano() is a vDSO but still costs tens of nanoseconds and
+     * pollutes branch prediction; recheck the deadline once per 64 polls
+     * instead of on every poll. */
+   uint64_t now = os_time_get_nano();
+   while(now < abs_timeout) {
       if (query_is_available(slot))
          return VK_SUCCESS;
       spin++;
@@ -642,7 +646,6 @@ wait_for_available(struct tu_device *device, struct tu_query_pool *pool,
 #elif defined(__aarch64__) || defined(__arm__)
          __asm__ volatile("yield" ::: "memory");
 #endif
-         continue;
       } else if (spin < 1024) {
          sched_yield();
       } else {
@@ -650,6 +653,8 @@ wait_for_available(struct tu_device *device, struct tu_query_pool *pool,
          if (sleep_us < 1000)
             sleep_us *= 2;
       }
+      if ((spin & 63) == 0)
+         now = os_time_get_nano();
    }
    return vk_error(device, VK_TIMEOUT);
 }

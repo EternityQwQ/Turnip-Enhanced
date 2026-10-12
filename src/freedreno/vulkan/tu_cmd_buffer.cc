@@ -4723,31 +4723,50 @@ tu_CmdBindVertexBuffers2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    struct tu_cs cs;
 
-   cmd->state.max_vbs_bound = MAX2(
-      cmd->state.max_vbs_bound, firstBinding + bindingCount);
+   /* Compare-then-update: identical rebinds (common in ANGLE/zink) skip
+    * the draw-state allocation and the full 0..max re-emit below. */
+   bool vb_changed = false;
+   for (uint32_t i = 0; i < bindingCount; i++) {
+      uint64_t base;
+      uint32_t size;
+      if (pBuffers[i] == VK_NULL_HANDLE) {
+         base = 0;
+         size = 0;
+      } else {
+         struct tu_buffer *buf = tu_buffer_from_handle(pBuffers[i]);
+         base = vk_buffer_address(&buf->vk, pOffsets[i]);
+         size = vk_buffer_range(&buf->vk, pOffsets[i], pSizes ? pSizes[i] : VK_WHOLE_SIZE);
+      }
+      if (cmd->state.vb[firstBinding + i].base != base ||
+          cmd->state.vb[firstBinding + i].size != size) {
+         cmd->state.vb[firstBinding + i].base = base;
+         cmd->state.vb[firstBinding + i].size = size;
+         vb_changed = true;
+      }
+   }
+
+   uint32_t new_max = MAX2(cmd->state.max_vbs_bound, firstBinding + bindingCount);
+   if (new_max != cmd->state.max_vbs_bound) {
+      cmd->state.max_vbs_bound = new_max;
+      vb_changed = true;
+   }
 
    if (pStrides) {
       vk_cmd_set_vertex_binding_strides(&cmd->vk, firstBinding, bindingCount,
                                         pStrides);
+      /* Strides feed the same VFD state; treat as change (framework keeps
+       * its own dirty, we just must not skip the emit below). */
+      vb_changed = true;
    }
 
-   cmd->state.vertex_buffers.size = 4 * cmd->state.max_vbs_bound;
-   cmd->state.vertex_buffers.iova =
-      tu_cs_draw_state(&cmd->sub_cs, &cs, cmd->state.vertex_buffers.size).iova;
+    if (!vb_changed)
+       return;
 
-   for (uint32_t i = 0; i < bindingCount; i++) {
-      if (pBuffers[i] == VK_NULL_HANDLE) {
-         cmd->state.vb[firstBinding + i].base = 0;
-         cmd->state.vb[firstBinding + i].size = 0;
-      } else {
-         struct tu_buffer *buf = tu_buffer_from_handle(pBuffers[i]);
-         cmd->state.vb[firstBinding + i].base = vk_buffer_address(&buf->vk, pOffsets[i]);
-         cmd->state.vb[firstBinding + i].size =
-            vk_buffer_range(&buf->vk, pOffsets[i], pSizes ? pSizes[i] : VK_WHOLE_SIZE);
-      }
-   }
+    cmd->state.vertex_buffers.size = 4 * cmd->state.max_vbs_bound;
+    cmd->state.vertex_buffers.iova =
+       tu_cs_draw_state(&cmd->sub_cs, &cs, cmd->state.vertex_buffers.size).iova;
 
-   for (uint32_t i = 0; i < cmd->state.max_vbs_bound; i++) {
+    for (uint32_t i = 0; i < cmd->state.max_vbs_bound; i++) {
       tu_cs_emit_regs(&cs,
                       A6XX_VFD_VERTEX_BUFFER_BASE(i, .qword = cmd->state.vb[i].base),
                       A6XX_VFD_VERTEX_BUFFER_SIZE(i, cmd->state.vb[i].size));
@@ -4788,24 +4807,28 @@ tu_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer,
       UNREACHABLE("invalid VkIndexType");
    }
 
-   /* From the Vulkan 1.4.348 spec, vkCmdSetPrimitiveRestartIndexEXT():
-    *
-    *    "Binding an index buffer invalidates the custom index value."
-    *
-    * Updating the dynamic state here resets the restart index to the type's
-    * default and lets the draw path re-emit PC_RESTART_INDEX.
-    */
-   vk_cmd_set_index_buffer_type(&cmd->vk, indexType);
+    uint64_t new_va = buf ? vk_buffer_address(&buf->vk, offset) : 0;
+    uint32_t new_max = buf ? size >> index_shift : 0;
 
-   if (buf) {
-      cmd->state.index_va = vk_buffer_address(&buf->vk, offset);
-      cmd->state.max_index_count = size >> index_shift;
-      cmd->state.index_size = index_size;
-   } else {
-      cmd->state.index_va = 0;
-      cmd->state.max_index_count = 0;
-      cmd->state.index_size = 0;
-   }
+    /* Skip framework dirty on identical rebinds: re-marking dirty here
+     * would force a pointless PC_RESTART_INDEX re-emit in the draw path. */
+    if (new_va == cmd->state.index_va &&
+        new_max == cmd->state.max_index_count &&
+        index_size == cmd->state.index_size)
+       return;
+
+    /* From the Vulkan 1.4.348 spec, vkCmdSetPrimitiveRestartIndexEXT():
+     *
+     *    "Binding an index buffer invalidates the custom index value."
+     *
+     * Updating the dynamic state here resets the restart index to the type's
+     * default and lets the draw path re-emit PC_RESTART_INDEX.
+     */
+    vk_cmd_set_index_buffer_type(&cmd->vk, indexType);
+
+    cmd->state.index_va = new_va;
+    cmd->state.max_index_count = new_max;
+    cmd->state.index_size = index_size;
 }
 TU_GENX(tu_CmdBindIndexBuffer2KHR);
 
@@ -5096,21 +5119,24 @@ tu_set_descriptor_buffer_offsets(
    descriptors_state->max_sets_bound = MAX2(descriptors_state->max_sets_bound,
                                             info->firstSet + info->setCount);
 
-   for (unsigned i = 0; i < info->setCount; ++i) {
-      unsigned idx = i + info->firstSet;
-      struct tu_descriptor_set_layout *set_layout = layout->set[idx].layout;
+    for (unsigned i = 0; i < info->setCount; ++i) {
+       unsigned idx = i + info->firstSet;
+       struct tu_descriptor_set_layout *set_layout = layout->set[idx].layout;
 
-      descriptors_state->set_iova[idx] =
-         (cmd->state.descriptor_buffer_iova[info->pBufferIndices[i]] +
-          info->pOffsets[i]) |
-         BINDLESS_DESCRIPTOR_64B;
+       /* Skip dirty marking and re-emit when the iova is unchanged. */
+       uint64_t new_iova =
+          (cmd->state.descriptor_buffer_iova[info->pBufferIndices[i]] +
+           info->pOffsets[i]) |
+          BINDLESS_DESCRIPTOR_64B;
+       if (descriptors_state->set_iova[idx] == new_iova)
+          continue;
+       descriptors_state->set_iova[idx] = new_iova;
 
-      if (cmd->device->physical_device->compiler_options.enable_ssbo_emulation ||
-          set_layout->has_inline_uniforms)
-         cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
-   }
-
-   tu_dirty_desc_sets(cmd, bind_point);
+       if (cmd->device->physical_device->compiler_options.enable_ssbo_emulation ||
+           set_layout->has_inline_uniforms)
+          cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
+       tu_dirty_desc_sets(cmd, bind_point);
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -5463,9 +5489,16 @@ tu_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
                         const VkPushConstantsInfoKHR *pPushConstantsInfo)
 {
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
+   /* Identical pushes are common (DXVK pushes the same values per draw);
+    * skip the memcpy and the full constants re-emit below. */
+   if (!memcmp((char *) cmd->push_constants + pPushConstantsInfo->offset,
+               pPushConstantsInfo->pValues, pPushConstantsInfo->size))
+      return;
    memcpy((char *) cmd->push_constants + pPushConstantsInfo->offset,
           pPushConstantsInfo->pValues, pPushConstantsInfo->size);
    cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
+   /* Version counter for the compute constants cache (see tu_dispatch). */
+   cmd->state.push_version++;
 }
 
 /* Clean everything which has been made available but we haven't actually
@@ -5656,13 +5689,16 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
        * the shader state IB. */
       if (cmd->state.last_compute_pipeline == pipeline)
          return;
-      cmd->state.last_compute_pipeline = pipeline;
-      cmd->state.shaders[MESA_SHADER_COMPUTE] =
-         pipeline->shaders[MESA_SHADER_COMPUTE];
-      tu_cs_emit_state_ib(&cmd->cs,
-                          pipeline->shaders[MESA_SHADER_COMPUTE]->state);
-      cmd->state.compute_load_state = pipeline->load_state;
-      return;
+       cmd->state.last_compute_pipeline = pipeline;
+       cmd->state.shaders[MESA_SHADER_COMPUTE] =
+          pipeline->shaders[MESA_SHADER_COMPUTE];
+       tu_cs_emit_state_ib(&cmd->cs,
+                           pipeline->shaders[MESA_SHADER_COMPUTE]->state);
+       cmd->state.compute_load_state = pipeline->load_state;
+       /* A new shader invalidates the cached compute constants. */
+       cmd->state.compute_const_valid = false;
+       cmd->state.has_last_cs_blocks = false;
+       return;
    }
 
    assert(pipelineBindPoint == VK_PIPELINE_BIND_POINT_GRAPHICS);
@@ -9526,22 +9562,38 @@ tu_emit_compute_driver_params(struct tu_cmd_buffer *cmd,
 
       uint64_t iova = 0;
 
-      if (!info->indirect) {
-         struct ir3_driver_params_cs driver_params =
-            build_driver_params_cs(variant, info);
+       if (!info->indirect) {
+          /* Identical direct dispatches reuse the last driver-params IB
+           * instead of suballocating and copying it on every dispatch.
+           * Invalidated on pipeline bind (has_last_cs_blocks=false). */
+          if (cmd->state.has_last_cs_blocks &&
+              cmd->state.last_cs_blocks[0] == info->blocks[0] &&
+              cmd->state.last_cs_blocks[1] == info->blocks[1] &&
+              cmd->state.last_cs_blocks[2] == info->blocks[2] &&
+              cmd->state.last_cs_driver_iova) {
+             iova = cmd->state.last_cs_driver_iova;
+          } else {
+             struct ir3_driver_params_cs driver_params =
+                build_driver_params_cs(variant, info);
 
-         assert(num_consts <= dword_sizeof(driver_params));
+             assert(num_consts <= dword_sizeof(driver_params));
 
-         struct tu_cs_memory consts;
-         uint32_t consts_vec4 = DIV_ROUND_UP(num_consts, 4);
-         VkResult result = tu_cs_alloc(&cmd->sub_cs, consts_vec4, 4, &consts);
-         if (result != VK_SUCCESS) {
-            vk_command_buffer_set_error(&cmd->vk, result);
-            return;
-         }
-         memcpy(consts.map, &driver_params, num_consts * sizeof(uint32_t));
-         iova = consts.iova;
-      } else if (direct_indirect_load) {
+             struct tu_cs_memory consts;
+             uint32_t consts_vec4 = DIV_ROUND_UP(num_consts, 4);
+             VkResult result = tu_cs_alloc(&cmd->sub_cs, consts_vec4, 4, &consts);
+             if (result != VK_SUCCESS) {
+                vk_command_buffer_set_error(&cmd->vk, result);
+                return;
+             }
+             memcpy(consts.map, &driver_params, num_consts * sizeof(uint32_t));
+             iova = consts.iova;
+             cmd->state.last_cs_blocks[0] = info->blocks[0];
+             cmd->state.last_cs_blocks[1] = info->blocks[1];
+             cmd->state.last_cs_blocks[2] = info->blocks[2];
+             cmd->state.has_last_cs_blocks = true;
+             cmd->state.last_cs_driver_iova = iova;
+          }
+       } else if (direct_indirect_load) {
          iova = info->indirect;
       } else {
          /* Vulkan guarantees only 4 byte alignment for indirect_offset.
@@ -9732,13 +9784,26 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
 
    cmd->device->autotune->emit_reset_rp_hash_draw_state(cmd, cs);
 
-   /* TODO: We could probably flush less if we add a compute_flush_bits
+    /* TODO: We could probably flush less if we add a compute_flush_bits
     * bitfield.
     */
    tu_emit_cache_flush<CHIP>(cmd);
 
+   /* Compute dispatches have no dirty gate for constants (the graphics
+    * path does), so cache the emitted IB and reuse it while neither push
+    * constants nor compute descriptors changed.
+    * NOTE: this must not consume TU_CMD_DIRTY_SHADER_CONSTS, which the
+    * graphics path owns; observe push changes through push_version
+    * instead. */
+   if (!cmd->state.compute_const_valid ||
+       cmd->state.compute_const_push_version != cmd->state.push_version ||
+       (cmd->state.dirty & TU_CMD_DIRTY_COMPUTE_DESC_SETS)) {
+      cmd->state.compute_const = tu_emit_consts<CHIP>(cmd, true);
+      cmd->state.compute_const_valid = true;
+      cmd->state.compute_const_push_version = cmd->state.push_version;
+   }
    /* note: no reason to have this in a separate IB */
-   tu_cs_emit_state_ib(cs, tu_emit_consts<CHIP>(cmd, true));
+   tu_cs_emit_state_ib(cs, cmd->state.compute_const);
 
    tu_emit_compute_driver_params<CHIP>(cmd, cs, info);
 

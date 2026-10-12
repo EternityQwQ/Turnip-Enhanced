@@ -27,11 +27,17 @@ struct tu_suballocator
    struct tu_bo *bo;
    uint32_t next_offset;
 
-   /** Small MRU pool of recycled BOs instead of a single slot: with one
+    /** Small MRU pool of recycled BOs instead of a single slot: with one
     * slot a working set larger than default_size ping-pongs between
     * alloc+free every time. Externally synchronized, no locking. */
    struct tu_bo *cached_bos[TU_SUBALLOC_CACHED_BOS];
    uint32_t cached_count;
+   /** Small MRU pool of recycled BOs instead of a single slot: with one
+    * slot a working set larger than default_size ping-pongs between
+    * alloc+free every time. Total pooled bytes are capped so a transient
+    * peak never pins large BOs forever. Externally synchronized, no
+    * locking. */
+   uint64_t cached_bytes;
 
    const char *name;
 };
