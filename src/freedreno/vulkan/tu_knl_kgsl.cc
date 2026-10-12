@@ -2081,8 +2081,10 @@ kgsl_submit_reserve_entries(struct tu_device *device, void *_submit,
       (struct tu_kgsl_queue_submit *)_submit;
    if (!num_entries)
       return;
-   util_dynarray_grow(&submit->commands, struct kgsl_command_object,
-                      num_entries);
+   /* Best-effort capacity hint only: failure just means a later grow
+    * handles it, so the returned pointer is intentionally unused. */
+   (void) util_dynarray_grow(&submit->commands, struct kgsl_command_object,
+                             num_entries);
    submit->commands.size -= num_entries * sizeof(struct kgsl_command_object);
 }
 
@@ -2257,6 +2259,19 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
 
     VkResult result = VK_SUCCESS;
 
+   /* The semaphore array size depends only on the inputs: allocate and
+    * validate it before acquiring any resources below, so the OOM path
+    * can return directly. Jumping to fail_submit from here would cross
+    * the zero-initialized submit state further down (ill-formed C++). */
+   STACK_ARRAY(const struct kgsl_syncobj *, wait_semaphores, wait_count);
+   if (!wait_semaphores && wait_count)
+      return vk_error(queue->device, VK_ERROR_OUT_OF_HOST_MEMORY);
+   for (uint32_t i = 0; i < wait_count; i++) {
+      wait_semaphores[i] =
+         &container_of(waits[i].sync, struct vk_kgsl_syncobj, vk)
+             ->syncobj;
+   }
+
    if (submit->bind_cmds.size != 0)
       kgsl_bind_finalize(submit);
 
@@ -2293,18 +2308,6 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
          (struct kgsl_cmdbatch_profiling_buffer *) tu_suballoc_bo_map(bo);
       memset(profiling_buffer, 0, sizeof(*profiling_buffer));
    }
-
-    /* Stack-or-heap array: wait_count is application-controlled. */
-    STACK_ARRAY(const struct kgsl_syncobj *, wait_semaphores, wait_count);
-    if (!wait_semaphores && wait_count) {
-       result = vk_error(queue->device, VK_ERROR_OUT_OF_HOST_MEMORY);
-       goto fail_submit;
-    }
-    for (uint32_t i = 0; i < wait_count; i++) {
-       wait_semaphores[i] =
-          &container_of(waits[i].sync, struct vk_kgsl_syncobj, vk)
-              ->syncobj;
-    }
 
    struct kgsl_cmd_syncpoint_timestamp ts;
    struct kgsl_cmd_syncpoint_fence fn;

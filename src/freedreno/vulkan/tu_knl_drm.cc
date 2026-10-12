@@ -179,11 +179,12 @@ msm_submit_reserve_entries(struct tu_device *device, void *_submit,
       (struct tu_msm_queue_submit *)_submit;
    if (!num_entries)
       return;
-   /* Reserve capacity without changing size: grow then rewind. */
-   util_dynarray_grow(&submit->commands, struct drm_msm_gem_submit_cmd,
-                      num_entries);
+   /* Best-effort capacity hint only: failure just means a later grow
+    * handles it, so the returned pointers are intentionally unused. */
+   (void) util_dynarray_grow(&submit->commands, struct drm_msm_gem_submit_cmd,
+                             num_entries);
    submit->commands.size -= num_entries * sizeof(struct drm_msm_gem_submit_cmd);
-   util_dynarray_grow(&submit->command_bos, struct tu_bo *, num_entries);
+   (void) util_dynarray_grow(&submit->command_bos, struct tu_bo *, num_entries);
    submit->command_bos.size -= num_entries * sizeof(struct tu_bo *);
 }
 
