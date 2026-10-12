@@ -399,15 +399,19 @@ queue_submit_sparse(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       goto out;
    }
 
-   device->submit_count++;
+    device->submit_count++;
 
-   pthread_mutex_unlock(&device->submit_mutex);
-   pthread_cond_broadcast(&queue->device->timeline_cond);
+    pthread_mutex_unlock(&device->submit_mutex);
+    /* The MSM backend never waits on this condvar (it uses kernel
+     * syncobjs), so skip the broadcast when nobody is waiting and avoid
+     * waking every waiter thread on each submit. */
+    if (__atomic_load_n(&queue->device->timeline_waiters, __ATOMIC_RELAXED) > 0)
+       pthread_cond_broadcast(&queue->device->timeline_cond);
 
-out:
-   tu_submit_finish(device, submit);
+ out:
+    tu_submit_finish(device, submit);
 
-   return result;
+    return result;
 }
 
 static VkResult
@@ -449,17 +453,25 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       return result;
    }
 
-   pthread_mutex_lock(&device->submit_mutex);
-
+   /* Scanning for tracepoints is pure CPU work, do it before taking the
+    * submit lock. */
    bool has_trace_points = false;
-   static_assert(offsetof(struct tu_cmd_buffer, vk) == 0,
-                 "vk must be first member of tu_cmd_buffer");
-   for (unsigned i = 0; i < vk_submit->command_buffer_count; i++) {
-      if (u_trace_enabled && u_trace_has_points(&cmd_buffers[i]->trace))
-         has_trace_points = true;
+   if (u_trace_enabled) {
+      static_assert(offsetof(struct tu_cmd_buffer, vk) == 0,
+                    "vk must be first member of tu_cmd_buffer");
+      /* Scan the expanded list: dynamically inserted command buffers can
+       * carry tracepoints too. */
+      for (unsigned i = 0; i < cmdbuf_count; i++) {
+         if (u_trace_has_points(&cmd_buffers[i]->trace)) {
+            has_trace_points = true;
+            break;
+         }
+      }
    }
 
-   struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
+    pthread_mutex_lock(&device->submit_mutex);
+
+    struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
 
    /* Declared up here so the goto-based error paths below don't bypass
     * its initialization (ill-formed C++); assigned after submit. */
@@ -480,12 +492,27 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    if (result != VK_SUCCESS)
       goto out;
 
-   if (has_trace_points) {
-      tu_u_trace_submission_data_create(
-         device, cmd_buffers, cmdbuf_count, &u_trace_submission_data);
-   }
+    if (has_trace_points) {
+       tu_u_trace_submission_data_create(
+          device, cmd_buffers, cmdbuf_count, &u_trace_submission_data);
+    }
 
-   for (uint32_t i = 0; i < cmdbuf_count; i++) {
+    /* Reserve backing storage for all entries up front, so appending the
+     * per-command-buffer entries below doesn't repeatedly grow/realloc.
+     * Autotune and timestamp entries are still unknown here and append
+     * afterwards. */
+    {
+       uint32_t total = 0;
+       for (uint32_t i = 0; i < cmdbuf_count; i++) {
+          total += cmd_buffers[i]->cs.entry_count;
+          if (perf_pass_index != ~0)
+             total += 1;
+       }
+       if (total)
+          tu_submit_reserve_entries(device, submit, total);
+    }
+
+    for (uint32_t i = 0; i < cmdbuf_count; i++) {
       struct tu_cmd_buffer *cmd_buffer = cmd_buffers[i];
       struct tu_cs *cs = &cmd_buffer->cs;
 
@@ -516,16 +543,22 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
    if (cmdbuf_count && FD_RD_DUMP(ENABLE) &&
        fd_rd_output_begin(&queue->device->rd_output,
                           queue->device->vk.current_frame, queue->device->submit_count)) {
-      struct tu_device *device = queue->device;
-      struct fd_rd_output *rd_output = &device->rd_output;
+       struct tu_device *device = queue->device;
+       struct fd_rd_output *rd_output = &device->rd_output;
 
-      if (FD_RD_DUMP(FULL)) {
-         VkResult result = tu_queue_wait_fence(queue, queue->fence, ~0);
-         if (result != VK_SUCCESS) {
-            mesa_loge("FD_RD_DUMP_FULL: wait on previous submission for device %u and queue %d failed: %u",
-                      device->device_idx, queue->msm_queue_id, 0);
-         }
-      }
+       if (FD_RD_DUMP(FULL)) {
+          /* Never hold the submit lock across an unbounded fence wait:
+           * snapshot the previous fence, drop the lock, wait, then
+           * retake the lock. */
+          int prev_fence = queue->fence;
+          pthread_mutex_unlock(&device->submit_mutex);
+          VkResult result = tu_queue_wait_fence(queue, prev_fence, ~0);
+          pthread_mutex_lock(&device->submit_mutex);
+          if (result != VK_SUCCESS) {
+             mesa_loge("FD_RD_DUMP_FULL: wait on previous submission for device %u and queue %d failed: %u",
+                       device->device_idx, queue->msm_queue_id, 0);
+          }
+       }
 
       fd_rd_output_write_section(rd_output, RD_CHIP_ID, &device->physical_device->dev_id.chip_id, 8);
       fd_rd_output_write_section(rd_output, RD_CMD, "tu-dump", 8);
@@ -554,17 +587,16 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       fd_rd_output_end(rd_output);
    }
 
-   util_dynarray_fini(&dump_cmds);
+    util_dynarray_fini(&dump_cmds);
 
+    /* Refreshing debug names is pure CPU work, keep it out of the submit
+     * lock; only record here whether it is needed. */
+    bool need_perfetto_refresh = false;
 #ifdef HAVE_PERFETTO
-   if (u_trace_should_process(&device->trace_context)) {
-      for (int i = 0; i < vk_submit->command_buffer_count; i++)
-         tu_perfetto_refresh_debug_utils_object_name(device,
-            &vk_submit->command_buffers[i]->base);
-   }
+    need_perfetto_refresh = u_trace_should_process(&device->trace_context);
 #endif
 
-   result =
+    result =
       tu_queue_submit(queue, submit, vk_submit->waits, vk_submit->wait_count,
                       vk_submit->signals, vk_submit->signal_count,
                       u_trace_submission_data);
@@ -583,10 +615,21 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
       u_trace_submission_data->fence = queue->fence;
    }
 
-   pthread_mutex_unlock(&device->submit_mutex);
-   pthread_cond_broadcast(&queue->device->timeline_cond);
+    pthread_mutex_unlock(&device->submit_mutex);
+    /* Skip the broadcast when nobody is waiting (the common MSM case). */
+    if (__atomic_load_n(&queue->device->timeline_waiters, __ATOMIC_RELAXED) > 0)
+       pthread_cond_broadcast(&queue->device->timeline_cond);
 
-   tu_debug_bos_print_stats(device);
+#ifdef HAVE_PERFETTO
+    /* Deferred from above: refresh debug names once the lock is dropped. */
+    if (need_perfetto_refresh) {
+       for (unsigned i = 0; i < cmdbuf_count; i++)
+          tu_perfetto_refresh_debug_utils_object_name(device,
+             &cmd_buffers[i]->vk.base);
+    }
+#endif
+
+    tu_debug_bos_print_stats(device);
 
    if (u_trace_submission_data) {
       for (uint32_t i = 0; i < u_trace_submission_data->cmd_buffer_count; i++) {
