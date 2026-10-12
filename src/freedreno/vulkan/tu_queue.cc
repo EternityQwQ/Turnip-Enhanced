@@ -473,9 +473,13 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 
     struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
 
-   /* Declared up here so the goto-based error paths below don't bypass
+    /* Declared up here so the goto-based error paths below don't bypass
     * its initialization (ill-formed C++); assigned after submit. */
-   uint32_t submission_id = 0;
+    uint32_t submission_id = 0;
+
+    /* Same rule as submission_id: this is assigned after the submit ioctl
+     * but must be declared before any goto that can reach past it. */
+    bool need_perfetto_refresh = false;
 
    void *submit = tu_submit_create(device);
    if (!submit)
@@ -589,9 +593,7 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
 
     util_dynarray_fini(&dump_cmds);
 
-    /* Refreshing debug names is pure CPU work, keep it out of the submit
-     * lock; only record here whether it is needed. */
-    bool need_perfetto_refresh = false;
+    /* Assigned here, declared at function top (see note there). */
 #ifdef HAVE_PERFETTO
     need_perfetto_refresh = u_trace_should_process(&device->trace_context);
 #endif
