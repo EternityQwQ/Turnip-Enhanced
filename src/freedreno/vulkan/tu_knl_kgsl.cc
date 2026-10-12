@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <linux/dma-heap.h>
 #include <poll.h>
+#include <sched.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -20,6 +21,7 @@
 
 #include "util/libsync.h"
 #include "util/os_file.h"
+#include "util/os_time.h"
 #include "util/stack_array.h"
 #include "util/timespec.h"
 #include "util/u_debug.h"
@@ -1052,11 +1054,14 @@ kgsl_syncobj_wait(struct tu_device *device,
       if (abs_timeout_ns == 0)
          return VK_TIMEOUT; // If this is a simple poll then we can return early
 
-      pthread_mutex_lock(&device->submit_mutex);
-      struct timespec abstime;
-      timespec_from_nsec(&abstime, abs_timeout_ns);
+       pthread_mutex_lock(&device->submit_mutex);
+       struct timespec abstime;
+       timespec_from_nsec(&abstime, abs_timeout_ns);
 
-      while (s->state == KGSL_SYNCOBJ_STATE_UNSIGNALED) {
+       /* Register as a waiter so submitters can skip the broadcast when
+        * nobody is waiting. */
+       __atomic_add_fetch(&device->timeline_waiters, 1, __ATOMIC_RELAXED);
+       while (s->state == KGSL_SYNCOBJ_STATE_UNSIGNALED) {
          int ret;
          if (abs_timeout_ns == UINT64_MAX) {
             ret = pthread_cond_wait(&device->timeline_cond,
@@ -1065,18 +1070,20 @@ kgsl_syncobj_wait(struct tu_device *device,
             ret = pthread_cond_timedwait(&device->timeline_cond,
                                          &device->submit_mutex, &abstime);
          }
-         if (ret != 0) {
-            pthread_mutex_unlock(&device->submit_mutex);
+          if (ret != 0) {
+             __atomic_sub_fetch(&device->timeline_waiters, 1, __ATOMIC_RELAXED);
+             pthread_mutex_unlock(&device->submit_mutex);
 
-            if (ret == ETIMEDOUT)
-               return VK_TIMEOUT;
+             if (ret == ETIMEDOUT)
+                return VK_TIMEOUT;
 
-            return vk_errorf(device, VK_ERROR_UNKNOWN, "waiting for a pending KGSL sync object failed: %s",
-                             strerror(ret));
-         }
-      }
+             return vk_errorf(device, VK_ERROR_UNKNOWN, "waiting for a pending KGSL sync object failed: %s",
+                              strerror(ret));
+          }
+       }
 
-      pthread_mutex_unlock(&device->submit_mutex);
+       __atomic_sub_fetch(&device->timeline_waiters, 1, __ATOMIC_RELAXED);
+       pthread_mutex_unlock(&device->submit_mutex);
    }
 
    switch (s->state) {
@@ -1552,15 +1559,21 @@ vk_kgsl_sync_wait_many(struct vk_device *_device,
    if (wait_flags & VK_SYNC_WAIT_PENDING)
       return VK_SUCCESS;
 
-   if (wait_flags & VK_SYNC_WAIT_ANY) {
-      struct kgsl_syncobj *syncobjs[wait_count];
-      for (uint32_t i = 0; i < wait_count; i++) {
-         syncobjs[i] =
-            &container_of(waits[i].sync, struct vk_kgsl_syncobj, vk)->syncobj;
-      }
+    if (wait_flags & VK_SYNC_WAIT_ANY) {
+       /* wait_count comes from the application and is unbounded, so use a
+        * stack-or-heap array instead of a variable-length stack array. */
+       STACK_ARRAY(struct kgsl_syncobj *, syncobjs, wait_count);
+       if (!syncobjs && wait_count)
+          return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+       for (uint32_t i = 0; i < wait_count; i++) {
+          syncobjs[i] =
+             &container_of(waits[i].sync, struct vk_kgsl_syncobj, vk)->syncobj;
+       }
 
-      return kgsl_syncobj_wait_any(device, syncobjs, wait_count,
-                                   abs_timeout_ns);
+       VkResult r = kgsl_syncobj_wait_any(device, syncobjs, wait_count,
+                                          abs_timeout_ns);
+       STACK_ARRAY_FINISH(syncobjs);
+       return r;
    } else {
       for (uint32_t i = 0; i < wait_count; i++) {
          struct vk_kgsl_syncobj *s =
@@ -2061,6 +2074,19 @@ kgsl_submit_add_entries(struct tu_device *device, void *_submit,
 }
 
 static void
+kgsl_submit_reserve_entries(struct tu_device *device, void *_submit,
+                            unsigned num_entries)
+{
+   struct tu_kgsl_queue_submit *submit =
+      (struct tu_kgsl_queue_submit *)_submit;
+   if (!num_entries)
+      return;
+   util_dynarray_grow(&submit->commands, struct kgsl_command_object,
+                      num_entries);
+   submit->commands.size -= num_entries * sizeof(struct kgsl_command_object);
+}
+
+static void
 kgsl_submit_add_bind(struct tu_device *device,
                      void *_submit,
                      struct tu_sparse_vma *vma, uint64_t vma_offset,
@@ -2148,12 +2174,15 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
        * though it will return an incremented fence timestamp (which will
        * never be signaled).
        */
-      const struct kgsl_syncobj *wait_semaphores[wait_count + 1];
-      for (uint32_t i = 0; i < wait_count; i++) {
-         wait_semaphores[i] = &container_of(waits[i].sync,
-                                            struct vk_kgsl_syncobj, vk)
-                                  ->syncobj;
-      }
+       /* Stack-or-heap array: wait_count is application-controlled. */
+       STACK_ARRAY(const struct kgsl_syncobj *, wait_semaphores, wait_count + 1);
+       if (!wait_semaphores)
+          return vk_error(queue->device, VK_ERROR_OUT_OF_HOST_MEMORY);
+       for (uint32_t i = 0; i < wait_count; i++) {
+          wait_semaphores[i] = &container_of(waits[i].sync,
+                                             struct vk_kgsl_syncobj, vk)
+                                   ->syncobj;
+       }
 
       struct kgsl_syncobj last_submit_sync;
       if (queue->fence >= 0)
@@ -2170,18 +2199,20 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
       wait_semaphores[wait_count] = &last_submit_sync;
 
       struct kgsl_syncobj wait_sync;
-      VkResult result = kgsl_syncobj_merge(queue->device, wait_semaphores,
-                                           wait_count + 1, &wait_sync);
-      if (unlikely(result != VK_SUCCESS)) {
-         kgsl_syncobj_destroy(&wait_sync);
-         kgsl_syncobj_destroy(&last_submit_sync);
-         return result;
-      }
-      if (unlikely(wait_sync.state == KGSL_SYNCOBJ_STATE_UNSIGNALED)) {
-         kgsl_syncobj_destroy(&wait_sync);
-         kgsl_syncobj_destroy(&last_submit_sync);
-         return vk_device_set_lost(&queue->device->vk, "refusing to submit an unsignaled semaphore wait to KGSL");
-      }
+       VkResult result = kgsl_syncobj_merge(queue->device, wait_semaphores,
+                                            wait_count + 1, &wait_sync);
+       if (unlikely(result != VK_SUCCESS)) {
+          kgsl_syncobj_destroy(&wait_sync);
+          kgsl_syncobj_destroy(&last_submit_sync);
+          STACK_ARRAY_FINISH(wait_semaphores);
+          return result;
+       }
+       if (unlikely(wait_sync.state == KGSL_SYNCOBJ_STATE_UNSIGNALED)) {
+          kgsl_syncobj_destroy(&wait_sync);
+          kgsl_syncobj_destroy(&last_submit_sync);
+          STACK_ARRAY_FINISH(wait_semaphores);
+          return vk_device_set_lost(&queue->device->vk, "refusing to submit an unsignaled semaphore wait to KGSL");
+       }
 
       /* Vulkan represents an already-signaled sync-file payload as fd -1,
        * while Android EGL native-fence consumers require a real sync_file.
@@ -2218,12 +2249,13 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
          kgsl_syncobj_destroy(&wait_sync);
       }
 
-      kgsl_syncobj_destroy(&last_submit_sync);
+       kgsl_syncobj_destroy(&last_submit_sync);
 
-      return VK_SUCCESS;
-   }
+       STACK_ARRAY_FINISH(wait_semaphores);
+       return VK_SUCCESS;
+    }
 
-   VkResult result = VK_SUCCESS;
+    VkResult result = VK_SUCCESS;
 
    if (submit->bind_cmds.size != 0)
       kgsl_bind_finalize(submit);
@@ -2262,12 +2294,17 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
       memset(profiling_buffer, 0, sizeof(*profiling_buffer));
    }
 
-   const struct kgsl_syncobj *wait_semaphores[wait_count];
-   for (uint32_t i = 0; i < wait_count; i++) {
-      wait_semaphores[i] =
-         &container_of(waits[i].sync, struct vk_kgsl_syncobj, vk)
-             ->syncobj;
-   }
+    /* Stack-or-heap array: wait_count is application-controlled. */
+    STACK_ARRAY(const struct kgsl_syncobj *, wait_semaphores, wait_count);
+    if (!wait_semaphores && wait_count) {
+       result = vk_error(queue->device, VK_ERROR_OUT_OF_HOST_MEMORY);
+       goto fail_submit;
+    }
+    for (uint32_t i = 0; i < wait_count; i++) {
+       wait_semaphores[i] =
+          &container_of(waits[i].sync, struct vk_kgsl_syncobj, vk)
+              ->syncobj;
+    }
 
    struct kgsl_cmd_syncpoint_timestamp ts;
    struct kgsl_cmd_syncpoint_fence fn;
@@ -2387,11 +2424,27 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
 
 #if HAVE_PERFETTO
    if (profiling_buffer) {
-      /* We need to wait for KGSL to queue the GPU command before we can read
-       * the timestamp. Since this is just for profiling and doesn't take too
-       * long, we can just busy-wait for it.
-       */
-      while (p_atomic_read(&profiling_buffer->gpu_ticks_queued) == 0);
+      /* KGSL must queue the GPU command before the timestamp below can be
+       * read. Spin with yield backoff instead of a pure hot loop, which
+       * burned a whole core while tracing was enabled. */
+      for (uint32_t spin = 0;
+           p_atomic_read(&profiling_buffer->gpu_ticks_queued) == 0; spin++) {
+         if (spin < 256) {
+#if defined(__aarch64__) || defined(__arm__)
+            __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+         } else if (spin < 2048) {
+            sched_yield();
+         } else {
+            /* ~50us, give up after ~100ms (2000 sleeps) to avoid hanging
+             * submit forever on a dead GPU. */
+            os_time_sleep(50);
+            if (spin > 4096)
+               break;
+         }
+      }
 
       struct kgsl_perfcounter_read_group perf = {
          .groupid = KGSL_PERFCOUNTER_GROUP_ALWAYSON,
@@ -2451,8 +2504,12 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
       submission_data->gpu_ts_offset = gpu_offset;
    }
 
-fail_submit:
-   if (result != VK_SUCCESS && u_trace_submission_data) {
+ fail_submit:
+    STACK_ARRAY_FINISH(wait_semaphores);
+    /* objs is submit-scoped: free it on both success and failure; it was
+     * previously leaked on every traced submit. */
+    vk_free(&queue->device->vk.alloc, objs);
+    if (result != VK_SUCCESS && u_trace_submission_data) {
       mtx_lock(&queue->device->kgsl_profiling_mutex);
       tu_suballoc_bo_free(&queue->device->kgsl_profiling_suballoc,
                           &u_trace_submission_data->kgsl_timestamp_bo);
@@ -2508,6 +2565,10 @@ kgsl_profiling_timeline_free(struct kgsl_profiling_timeline *profiling,
                              struct tu_queue *queue,
                              struct tu_u_trace_submission_data *u_trace_submission_data)
 {
+   /* cmd_obj is submit-scoped and must be freed here; it was previously
+    * leaked on every traced submit. */
+   vk_free(&queue->device->vk.alloc, profiling->cmd_obj);
+   profiling->cmd_obj = NULL;
    mtx_lock(&queue->device->kgsl_profiling_mutex);
    tu_suballoc_bo_free(&queue->device->kgsl_profiling_suballoc,
                        &u_trace_submission_data->kgsl_timestamp_bo);
@@ -2519,7 +2580,23 @@ static int
 kgsl_profiling_timeline_end_perfetto_submit(struct kgsl_profiling_timeline *profiling,
                                             struct tu_queue *queue)
 {
-   while (p_atomic_read(&profiling->buffer->gpu_ticks_queued) == 0);
+   /* Same bounded backoff as the syncobj submit path above. */
+   for (uint32_t spin = 0;
+        p_atomic_read(&profiling->buffer->gpu_ticks_queued) == 0; spin++) {
+      if (spin < 256) {
+#if defined(__aarch64__) || defined(__arm__)
+         __asm__ volatile("yield" ::: "memory");
+#elif defined(__x86_64__) || defined(__i386__)
+         __builtin_ia32_pause();
+#endif
+      } else if (spin < 2048) {
+         sched_yield();
+      } else {
+         os_time_sleep(50);
+         if (spin > 4096)
+            break;
+      }
+   }
 
    struct kgsl_perfcounter_read_group perf = {
       .groupid = KGSL_PERFCOUNTER_GROUP_ALWAYSON,
@@ -2836,9 +2913,18 @@ kgsl_queue_submit_timeline(struct tu_queue *queue, void *_submit,
    if (u_trace_submission_data)
       u_trace_submission_data->gpu_ts_offset = profiling.gpu_offset;
 
-fail_submit:
-   if (result != VK_SUCCESS && u_trace_submission_data)
-      kgsl_profiling_timeline_free(&profiling, queue, u_trace_submission_data);
+ fail_submit:
+    /* cmd_obj is submit-scoped and always freed below; the timestamp BO
+     * belongs to the submission data on success and is only reclaimed
+     * here on failure. */
+    vk_free(&queue->device->vk.alloc, profiling.cmd_obj);
+    profiling.cmd_obj = NULL;
+    if (result != VK_SUCCESS && u_trace_submission_data) {
+       mtx_lock(&queue->device->kgsl_profiling_mutex);
+       tu_suballoc_bo_free(&queue->device->kgsl_profiling_suballoc,
+                           &u_trace_submission_data->kgsl_timestamp_bo);
+       mtx_unlock(&queue->device->kgsl_profiling_mutex);
+    }
 
    STACK_ARRAY_FINISH(cmd_syncpoint_fence);
    STACK_ARRAY_FINISH(cmd_syncpoints);
@@ -2947,6 +3033,7 @@ static const struct tu_knl kgsl_knl_funcs = {
       .submit_create = kgsl_submit_create,
       .submit_finish = kgsl_submit_finish,
       .submit_add_entries = kgsl_submit_add_entries,
+      .submit_reserve_entries = kgsl_submit_reserve_entries,
       .submit_add_bind = kgsl_submit_add_bind,
       .queue_submit = kgsl_queue_submit,
       .queue_wait_fence = kgsl_queue_wait_fence,
