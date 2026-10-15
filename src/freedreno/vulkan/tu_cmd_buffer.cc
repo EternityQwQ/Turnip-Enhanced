@@ -10478,6 +10478,7 @@ tu_barrier(struct tu_cmd_buffer *cmd,
        srcStage == 0 && dstStage == 0)
       return;
 
+   bool by_region = false;
    if (cmd->state.pass) {
       const VkPipelineStageFlags2 framebuffer_space_stages =
          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |

@@ -683,6 +683,13 @@ struct tu_cmd_state
    struct tu_vs_params last_vs_params;
    bool last_draw_indexed;
 
+   /* Set by tu_sw_multiview_draw() while it replays a draw for a single view
+    * on devices without HW multiview. Outside of it SW multiview is never
+    * active, so ordinary draws are unaffected.
+    */
+   bool sw_multiview;
+   uint32_t sw_view_index;
+
    /* Same-pipeline rebind early-out. memset(0) at begin => NULL. */
    const void *last_gfx_pipeline;
    const void *last_compute_pipeline;
