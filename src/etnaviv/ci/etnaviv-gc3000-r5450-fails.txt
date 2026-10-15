@@ -13,9 +13,3 @@ dEQP-GLES2.functional.shaders.invariance.lowp.subexpression_precision_mediump,Fa
 dEQP-GLES2.functional.shaders.invariance.mediump.loop_2,Fail
 dEQP-GLES2.functional.shaders.invariance.mediump.loop_3,Fail
 dEQP-GLES2.functional.shaders.invariance.mediump.subexpression_precision_lowp,Fail
-dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_linear_linear_clamp,Fail
-dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_linear_linear_mirror,Fail
-dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_linear_linear_repeat,Fail
-dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_nearest_linear_clamp,Fail
-dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_nearest_linear_mirror,Fail
-dEQP-GLES2.functional.texture.vertex.cube.filtering.nearest_mipmap_nearest_linear_repeat,Fail

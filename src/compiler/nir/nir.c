@@ -2603,6 +2603,20 @@ nir_intrinsic_from_system_value(gl_system_value val)
       return nir_intrinsic_load_color0_amd;
    case SYSTEM_VALUE_COLOR1_AMD:
       return nir_intrinsic_load_color1_amd;
+   case SYSTEM_VALUE_BARYCENTRIC_LINEAR_PIXEL:
+      return nir_intrinsic_load_barycentric_pixel;
+   case SYSTEM_VALUE_BARYCENTRIC_LINEAR_CENTROID:
+      return nir_intrinsic_load_barycentric_centroid;
+   case SYSTEM_VALUE_BARYCENTRIC_LINEAR_SAMPLE:
+      return nir_intrinsic_load_barycentric_sample;
+   case SYSTEM_VALUE_BARYCENTRIC_PERSP_PIXEL:
+      return nir_intrinsic_load_barycentric_pixel;
+   case SYSTEM_VALUE_BARYCENTRIC_PERSP_CENTROID:
+      return nir_intrinsic_load_barycentric_centroid;
+   case SYSTEM_VALUE_BARYCENTRIC_PERSP_SAMPLE:
+      return nir_intrinsic_load_barycentric_sample;
+   case SYSTEM_VALUE_BARYCENTRIC_PULL_MODEL:
+      return nir_intrinsic_load_barycentric_model;
    default:
       return nir_num_intrinsics;
    }
@@ -2871,6 +2885,9 @@ nir_rewrite_image_intrinsic(nir_intrinsic_instr *intrin, nir_def *src,
       }                                                         \
       break;
       CASE(load)
+      CASE(input_attachment_load)
+      CASE(depth_input_attachment_load)
+      CASE(stencil_input_attachment_load)
       CASE(sparse_load)
       CASE(store)
       CASE(atomic)
@@ -3464,6 +3481,7 @@ nir_tex_instr_need_sampler(const nir_tex_instr *instr)
    case nir_texop_image_min_lod_agx:
    case nir_texop_fragment_mask_fetch_amd:
    case nir_texop_fragment_fetch_amd:
+   case nir_texop_txs_lod0_intel:
    case nir_texop_resinfo_intel:
    case nir_texop_sparse_residency_txf_intel:
       return false;
@@ -3472,11 +3490,25 @@ nir_tex_instr_need_sampler(const nir_tex_instr *instr)
    }
 }
 
+bool
+nir_tex_instr_need_texture_2(const nir_tex_instr *instr)
+{
+   switch (instr->op) {
+   case nir_texop_sample_weighted_qcom:
+   case nir_texop_block_match_sad_qcom:
+   case nir_texop_block_match_ssd_qcom:
+      return true;
+   default:
+      return false;
+   }
+}
+
 unsigned
 nir_tex_instr_result_size(const nir_tex_instr *instr)
 {
    switch (instr->op) {
-   case nir_texop_txs: {
+   case nir_texop_txs:
+   case nir_texop_txs_lod0_intel: {
       unsigned ret;
       switch (instr->sampler_dim) {
       case GLSL_SAMPLER_DIM_1D:
@@ -3569,6 +3601,7 @@ nir_tex_instr_is_query(const nir_tex_instr *instr)
    case nir_texop_hdr_dim_nv:
    case nir_texop_tex_type_nv:
    case nir_texop_sample_pos_nv:
+   case nir_texop_txs_lod0_intel:
    case nir_texop_resinfo_intel:
    case nir_texop_sparse_residency_intel:
    case nir_texop_sparse_residency_txf_intel:
@@ -3680,6 +3713,8 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
    case nir_tex_src_block_size:
    case nir_tex_src_texture_heap_offset:
    case nir_tex_src_sampler_heap_offset:
+   case nir_tex_src_texture_2_heap_offset:
+   case nir_tex_src_sampler_2_heap_offset:
       return nir_type_uint;
 
    case nir_num_tex_src_types:

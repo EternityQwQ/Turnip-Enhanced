@@ -8,7 +8,6 @@ import sys
 VALID_COMMON_VK_OPTIONS = {
     "force_vk_devicename",
     "vk_lower_terminate_to_discard",
-    "vk_zero_vram",
     "vk_require_etc2",
     "vk_require_astc",
 }
@@ -25,14 +24,14 @@ def declare_options():
           "Disable anisotropic filtering for single level images",
           c_name="disable_aniso_single_level"),
         B("radv_disable_dcc", False,
-          "Disable DCC for color images on GFX8-GFX11.5",
-          c_name="disable_dcc"),
+          "Disable DCC for color images on GFX8-GFX11.7",
+          c_name="disable_dcc", min_device_version=80, max_device_version=117),
         B("radv_disable_dcc_mips", False,
-          "Disable DCC for color images with mips on GFX8-GFX11.5",
-          c_name="disable_dcc_mips"),
+          "Disable DCC for color images with mips on GFX8-GFX11.7",
+          c_name="disable_dcc_mips", min_device_version=80, max_device_version=117),
         B("radv_disable_dcc_stores", False,
-          "Disable DCC for color storage images on GFX10-GFX11.5",
-          c_name="disable_dcc_stores"),
+          "Disable DCC for color storage images on GFX10-GFX11.7",
+          c_name="disable_dcc_stores", min_device_version=100, max_device_version=117),
         B("radv_disable_shrink_image_store", False,
           "Disabling shrinking of image stores based on the format",
           c_name="disable_shrink_image_store"),
@@ -90,6 +89,19 @@ def declare_options():
         B("radv_force_nan_preserve_min_max", False,
           "Treat FMax/FMin/FClamp like NMax/NMin/NClamp.",
           c_name="force_nan_preserve_min_max"),
+        B("radv_force_exact_glsl_fma", False,
+          "Disallow contract/reassociation for GLSLstd450Fma.",
+          c_name="force_exact_glsl_fma"),
+        B("radv_gfx10_descriptor_alias_robust", False,
+          "Shader based workaround to make reading storage/uniform/texel buffers as images robust.",
+          c_name="gfx10_descriptor_alias_robust"),
+        B("radv_disable_binning_gfx11", False,
+          "Disable primitive binning on GFX11 to workaround a hw bug.",
+          c_name="disable_binning_gfx11"),
+        B("radv_gfx11_full_size_cp_dma", False,
+          ("Don't limit CP DMA to 32K sizes per packet on GFX11+. " +
+           "Please test this and document which GFX11+ chips have broken CP DMA with sizes > 32K."),
+          c_name="gfx11_full_size_cp_dma")
     ]
 
     performance_options = [
@@ -109,11 +121,15 @@ def declare_options():
           "Expose a dedicated SDMA transfer queue so transfer-queue copies run on the async DMA engine.",
           c_name="enable_transfer_queue"),
         S("radv_gfx12_hiz_wa",
-          description="Choose the specific HiZ workaround to apply on GFX12 (RDNA4). Accepted values are: disabled, partial or full",
+          description="Choose the specific HiZ workaround to apply on GFX12 (RDNA4). Accepted values are: disabled, partial, full or full_rez",
           c_name="gfx12_hiz_wa"),
         B("radv_force_exclusive_image", False,
           description="Force using exclusive images for apps that incorrectly use concurrent for everything.",
           c_name="force_exclusive_image"),
+        I("radv_buffer_meta_path", 0, -1, 4,
+          ("Override the codepath for buffer clears and copies. " +
+           "(0 = default; -1 = CP DMA; 1,2,4 = compute shader with this number of dwords stored per invocation)"),
+          c_name="buffer_meta_path"),
         I("radv_image_meta_path", 0, 0, 3,
           ("Override the codepath for framebuffer clears, image clears, copies, blits, and MSAA resolves. " +
            "(0 = default, 1 = fragment shader, 2 = compute shader, 3 = fast clear)"),
@@ -178,7 +194,7 @@ def main():
     parser.add_argument('--drirc-src')
     parser.add_argument('--drirc-hdr')
     parser.add_argument('--rst')
-    parser.add_argument('--validate', required=True)
+    parser.add_argument('--validate', nargs='+', required=True)
     args = parser.parse_args()
 
     if (args.drirc_src is None) != (args.drirc_hdr is None):
@@ -187,7 +203,7 @@ def main():
     sys.path.insert(0, args.import_path)
     import drirc_gen
 
-    drirc_gen.drirc_validate([args.validate], declare_options())
+    drirc_gen.drirc_validate(args.validate, declare_options())
 
     if args.drirc_src and args.drirc_hdr:
         drirc_gen.drirc_generate(args.drirc_src, args.drirc_hdr, "radv", declare_options())

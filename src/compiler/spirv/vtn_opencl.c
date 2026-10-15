@@ -700,6 +700,25 @@ handle_special(struct vtn_builder *b, uint32_t opcode,
    }
    case OpenCLstd_Rotate:
       return nir_urol(nb, srcs[0], nir_u2u32(nb, srcs[1]));
+   case OpenCLstd_Log2:
+   case OpenCLstd_Log:
+   case OpenCLstd_Exp2:
+      /* Emit precise log2/log/exp2 as hardware transcendentals when the
+       * driver's hardware units meet the CL ULP budget. fp32 only; exp/pow
+       * are intentionally excluded (change-of-base exceeds ULP budget). */
+      if (b->shader->options->has_cl_log2_exp2 && srcs[0]->bit_size == 32) {
+         switch (cl_opcode) {
+         case OpenCLstd_Log2:
+            return nir_flog2(nb, srcs[0]);
+         case OpenCLstd_Log:
+            return nir_fmul_imm(nb, nir_flog2(nb, srcs[0]), log(2.0));
+         case OpenCLstd_Exp2:
+            return nir_fexp2(nb, srcs[0]);
+         default:
+            break;
+         }
+      }
+      break;
    default:
       break;
    }

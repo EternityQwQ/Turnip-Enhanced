@@ -262,6 +262,12 @@ struct radv_shader_info {
    };
 };
 
+static inline bool
+radv_ps_writes_mrtz(const struct radv_shader_info *info)
+{
+   return info->ps.writes_z || info->ps.writes_stencil || info->ps.writes_sample_mask;
+}
+
 /* Precomputed register values. */
 struct radv_shader_regs {
    uint32_t pgm_lo;

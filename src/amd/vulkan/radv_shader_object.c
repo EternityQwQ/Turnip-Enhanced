@@ -159,6 +159,26 @@ radv_shader_stage_init(const VkShaderCreateInfoEXT *sinfo, struct radv_shader_st
    if (out_stage->stage == MESA_SHADER_MESH) {
       out_stage->key.has_task_shader = !(sinfo->flags & VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT);
    }
+
+   VkPipelineShaderStageCreateInfo pipeline_info = {0};
+   VkShaderModuleCreateInfo minfo = {0};
+   VkShaderDescriptorSetAndBindingMappingInfoEXT pipeline_mapping = {0};
+   pipeline_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+   pipeline_info.pNext = &minfo;
+   pipeline_info.stage = sinfo->stage;
+   pipeline_info.pName = sinfo->pName;
+   pipeline_info.pSpecializationInfo = sinfo->pSpecializationInfo;
+   minfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+   if (sinfo->codeType == VK_SHADER_CODE_TYPE_SPIRV_EXT) {
+      minfo.codeSize = sinfo->codeSize;
+      minfo.pCode = sinfo->pCode;
+   }
+   if (mapping) {
+      minfo.pNext = &pipeline_mapping;
+      pipeline_mapping = *mapping;
+      pipeline_mapping.pNext = NULL;
+   }
+   vk_pipeline_hash_shader_stage(0, &pipeline_info, NULL, out_stage->shader_blake3);
 }
 
 static VkResult
@@ -298,10 +318,19 @@ static VkResult
 radv_shader_object_init_binary(struct radv_device *device, struct blob_reader *blob, struct radv_shader **shader_out,
                                struct radv_shader_binary **binary_out)
 {
-   const char *binary_blake3 = blob_read_bytes(blob, BLAKE3_KEY_LEN);
-   const uint32_t binary_size = blob_read_uint32(blob);
-   const struct radv_shader_binary *binary = blob_read_bytes(blob, binary_size);
+   const struct radv_shader_binary *binary;
    unsigned char blake3[BLAKE3_KEY_LEN];
+   const char *binary_blake3;
+   uint32_t binary_size;
+
+   binary_blake3 = blob_read_bytes(blob, BLAKE3_KEY_LEN);
+   if (!binary_blake3)
+      return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
+
+   binary_size = blob_read_uint32(blob);
+   binary = blob_read_bytes(blob, binary_size);
+   if (!binary || binary_size < sizeof(*binary) || binary->total_size != binary_size)
+      return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
 
    _mesa_blake3_compute(binary, binary->total_size, blake3);
    if (memcmp(blake3, binary_blake3, BLAKE3_KEY_LEN))
@@ -324,20 +353,20 @@ radv_shader_object_init(struct radv_shader_object *shader_obj, struct radv_devic
    shader_obj->code_type = pCreateInfo->codeType;
 
    if (pCreateInfo->codeType == VK_SHADER_CODE_TYPE_BINARY_EXT) {
-      if (pCreateInfo->codeSize < VK_UUID_SIZE + sizeof(uint32_t)) {
-         return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
-      }
-
       struct blob_reader blob;
       blob_reader_init(&blob, pCreateInfo->pCode, pCreateInfo->codeSize);
 
       const uint8_t *cache_uuid = blob_read_bytes(&blob, VK_UUID_SIZE);
+      if (!cache_uuid)
+         return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
 
       if (memcmp(cache_uuid, pdev->cache_uuid, VK_UUID_SIZE))
          return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
 
       const struct radv_shader_object_metadata *md =
          (struct radv_shader_object_metadata *)blob_read_bytes(&blob, sizeof(struct radv_shader_object_metadata));
+      if (!md)
+         return VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT;
 
       shader_obj->dynamic_offset_count = md->dynamic_offset_count;
 

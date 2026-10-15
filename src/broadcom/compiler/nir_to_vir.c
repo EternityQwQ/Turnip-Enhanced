@@ -2190,6 +2190,17 @@ mem_vectorize_callback(unsigned align_mul, unsigned align_offset,
         if (hole_size > 0 || !nir_num_components_valid(num_components))
                 return false;
 
+        /* Keep robust SSBO stores scalar before robustness lowering, so each
+         * one gets an independent bounds check. Once the lowering runs out of
+         * bounds stores will be dropped and we can safely vectorize any
+         * survivors.
+         */
+        const struct v3d_compile *c = data;
+        if (c->key->robust_storage_access && !c->robust_access_lowered &&
+            low->intrinsic == nir_intrinsic_store_ssbo) {
+                return false;
+        }
+
         /* TMU general access only supports 32-bit vectors */
         if (bit_size > 32)
                 return false;
@@ -2304,6 +2315,7 @@ v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s)
                                  nir_var_mem_push_const | nir_var_mem_shared |
                                  nir_var_mem_global,
                         .callback = mem_vectorize_callback,
+                        .cb_data = c,
                         .robust_modes = 0,
                 };
                 bool vectorize_progress = false;
@@ -2672,11 +2684,12 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
         int rt = nir_src_as_uint(instr->src[0]);
         assert(rt < V3D_MAX_DRAW_BUFFERS);
 
-        int sample_index = nir_intrinsic_base(instr) ;
+        int sample_index = nir_intrinsic_base(instr);
         assert(sample_index < V3D_MAX_SAMPLES);
 
         int component = nir_intrinsic_component(instr);
-        assert(component < 4);
+        int load_components = instr->def.num_components;
+        assert(component + load_components <= 4);
 
         /* We need to emit our TLB reads after we have acquired the scoreboard
          * lock, or the GPU will hang. Usually, we do our scoreboard locking on
@@ -2701,8 +2714,9 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 &c->color_reads[(rt * V3D_MAX_SAMPLES + sample_index) * 4];
 
         if (color_reads_for_sample[component].file == QFILE_NULL) {
-                nir_variable *var = c->output_color_var[rt];
-                int num_components = glsl_get_vector_elements(var->type);
+                /* Load and cache all components requested by this instruction.
+                 */
+                int num_components = component + load_components;
 
                 const bool swap_rb = c->fs_key->swap_color_rb & (1 << rt);
                 if (swap_rb)
@@ -2777,9 +2791,11 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 }
         }
 
-        assert(color_reads_for_sample[component].file != QFILE_NULL);
-        ntq_store_def(c, &instr->def, 0,
-                      vir_MOV(c, color_reads_for_sample[component]));
+        for (int i = 0; i < load_components; i++) {
+                assert(color_reads_for_sample[component + i].file != QFILE_NULL);
+                ntq_store_def(c, &instr->def, i,
+                              vir_MOV(c, color_reads_for_sample[component + i]));
+        }
 }
 
 static bool

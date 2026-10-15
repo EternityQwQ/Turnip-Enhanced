@@ -919,8 +919,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       /* We write the control buffer from the CPU, so need to grant CPU access to the BO.
        * The draw ring needs to be zero-initialized otherwise the ready bits will be incorrect.
        */
-      uint32_t task_rings_bo_flags =
-         RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM;
+      uint32_t task_rings_bo_flags = RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
       result = radv_bo_create(device, NULL, pdev->task_info.bo_size_bytes, 256, RADEON_DOMAIN_VRAM, task_rings_bo_flags,
                               RADV_BO_PRIORITY_SCRATCH, 0, true, &task_rings_bo);
@@ -1026,7 +1025,7 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
    const enum amd_ip_type hw_ip = radv_queue_family_to_ring(pdev, queue->qf);
 
    for (int i = 0; i < 3; ++i) {
-      enum rgp_flush_bits sqtt_flush_bits = 0;
+      enum ac_rgp_flush_bits rgp_flush_bits = 0;
       struct radv_cmd_stream *cs = NULL;
 
       result = radv_create_cmd_stream(device, hw_ip, false, &cs);
@@ -1077,18 +1076,18 @@ radv_update_preamble_cs(struct radv_queue_state *queue, struct radv_device *devi
       if (i < 2 || task_rings_bo) {
          /* The two initial preambles have a cache flush at the beginning. */
          const enum amd_gfx_level gfx_level = pdev->info.gfx_level;
-         enum radv_cmd_flush_bits flush_bits = RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE |
-                                               RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_L2 |
-                                               RADV_CMD_FLAG_START_PIPELINE_STATS;
+         enum ac_barrier_flags flush_bits = AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM |
+                                               AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2 |
+                                               AC_BARRIER_PIPELINESTAT_START;
 
          if (i == 0 || task_rings_bo) {
             /* The full flush preamble should also wait for previous shader work to finish. */
-            flush_bits |= RADV_CMD_FLAG_CS_PARTIAL_FLUSH;
+            flush_bits |= AC_BARRIER_SYNC_CS;
             if (queue->qf == RADV_QUEUE_GENERAL)
-               flush_bits |= RADV_CMD_FLAG_VS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH;
+               flush_bits |= AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS;
          }
 
-         radv_cs_emit_cache_flush(ws, cs, gfx_level, NULL, 0, flush_bits, &sqtt_flush_bits, 0);
+         radv_cs_emit_cache_flush(ws, cs, gfx_level, NULL, 0, flush_bits, &rgp_flush_bits, AC_PWS_ACQUIRE_POINT_PFP, 0);
       }
 
       /* Emit task rings after the initial cache flush and wait
@@ -1321,17 +1320,18 @@ radv_create_flush_postamble(struct radv_queue *queue)
    if (result != VK_SUCCESS)
       return result;
 
-   enum radv_cmd_flush_bits flush_bits = RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_INV_L2;
+   enum ac_barrier_flags flush_bits = AC_BARRIER_SYNC_CS | AC_BARRIER_INV_L2;
 
    if (ip == AMD_IP_GFX)
-      flush_bits |= RADV_CMD_FLAG_VS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH | RADV_CMD_FLAG_FLUSH_AND_INV_CB |
-                    RADV_CMD_FLAG_FLUSH_AND_INV_DB | RADV_CMD_FLAG_FLUSH_AND_INV_CB_META |
-                    RADV_CMD_FLAG_FLUSH_AND_INV_DB_META;
+      flush_bits |= AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_AND_INV_CB |
+                    AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_SYNC_AND_INV_CB_META |
+                    AC_BARRIER_SYNC_AND_INV_DB_META;
 
-   enum rgp_flush_bits sqtt_flush_bits = 0;
+   enum ac_rgp_flush_bits rgp_flush_bits = 0;
    uint32_t flush_cnt = 0;
 
-   radv_cs_emit_cache_flush(ws, cs, pdev->info.gfx_level, &flush_cnt, 0, flush_bits, &sqtt_flush_bits, 0);
+   radv_cs_emit_cache_flush(ws, cs, pdev->info.gfx_level, &flush_cnt, 0, flush_bits, &rgp_flush_bits,
+                            AC_PWS_ACQUIRE_POINT_PFP, 0);
 
    result = radv_finalize_cmd_stream(device, cs);
    if (result != VK_SUCCESS) {
@@ -1356,7 +1356,7 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
    VkResult r = VK_SUCCESS;
    struct radeon_winsys *ws = device->ws;
    struct radeon_winsys_bo *gang_sem_bo = NULL;
-   enum radeon_bo_flag gang_sem_bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM;
+   enum radeon_bo_flag gang_sem_bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING;
 
    /* Gang wait preamble is executed before the main preamble which means it may be
     * before a cache flush, which may cause the CP to read stale values. Bypass the
@@ -1433,26 +1433,38 @@ radv_create_gang_wait_preambles_postambles(struct radv_queue *queue)
     * in a multi-process environment, because task shader dispatches are not
     * meant to be executed on multiple compute engines at the same time.
     */
-   ac_emit_cp_wait_mem(
-      ace_pre_cs->b, ace_wait_va, 1, 0xffffffff,
-      S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE) | S_3C1_OPERATION(V_3C1_WAIT_MEM_PREEMPTABLE));
+
+   uint32_t ace_pre_wait_flags = S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE);
+   if (pdev->info.gfx_level >= GFX9)
+      ace_pre_wait_flags |= S_3C1_OPERATION(V_3C1_WAIT_MEM_PREEMPTABLE);
+   else if (pdev->info.gfx_level == GFX8)
+      ace_pre_wait_flags |= WAIT_REG_MEM_UNCACHED_VI_MEC;
+
+   ac_emit_cp_wait_mem(ace_pre_cs->b, ace_wait_va, 1, 0xffffffff, ace_pre_wait_flags);
    radv_cs_write_data(device, ace_pre_cs, V_371_MICRO_ENGINE, ace_wait_va, 1, &zero, false);
    radv_cs_write_data(device, leader_pre_cs, V_371_MICRO_ENGINE, ace_wait_va, 1, &one, false);
+
    /* Create postambles for gang submission.
     * This ensures that the gang leader waits for the whole gang,
     * which is necessary because the kernel signals the userspace fence
     * as soon as the gang leader is done, which may lead to bugs because the
     * same command buffers could be submitted again while still being executed.
     */
-   const uint32_t leader_engine_sel = ip == AMD_IP_GFX ? V_371_PREFETCH_PARSER : V_371_MICRO_ENGINE;
-   if (ip == AMD_IP_SDMA)
-      ac_emit_sdma_wait_mem(leader_post_cs->b, WAIT_REG_MEM_GREATER_OR_EQUAL, leader_wait_va, 1, 0xffffffff);
-   else
-      ac_emit_cp_wait_mem(
-         leader_post_cs->b, leader_wait_va, 1, 0xffffffff,
-         S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE) | S_3C1_ENGINE_SEL(leader_engine_sel));
-   radv_cs_write_data(device, leader_post_cs, leader_engine_sel, leader_wait_va, 1, &zero, false);
 
+   const uint32_t leader_engine_sel = ip == AMD_IP_GFX ? V_371_PREFETCH_PARSER : V_371_MICRO_ENGINE;
+
+   if (ip == AMD_IP_SDMA) {
+      ac_emit_sdma_wait_mem(leader_post_cs->b, pdev->info.sdma_ip_version, WAIT_REG_MEM_GREATER_OR_EQUAL,
+                            leader_wait_va, 1, 0xffffffff);
+   } else {
+      uint32_t cp_post_wait_flags =
+         S_3C1_FUNCTION(V_3C1_GREATER_THAN_OR_EQUAL_REFERENCE_VALUE) | S_3C1_ENGINE_SEL(leader_engine_sel);
+      if (pdev->info.gfx_level == GFX8 && ip == AMD_IP_COMPUTE)
+         cp_post_wait_flags |= WAIT_REG_MEM_UNCACHED_VI_MEC;
+
+      ac_emit_cp_wait_mem(leader_post_cs->b, leader_wait_va, 1, 0xffffffff, cp_post_wait_flags);
+   }
+   radv_cs_write_data(device, leader_post_cs, leader_engine_sel, leader_wait_va, 1, &zero, false);
    radv_cs_emit_write_event_eop(ace_post_cs, pdev->info.gfx_level, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM,
                                 EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM, EOP_DATA_SEL_VALUE_32BIT, leader_wait_va, 1, 0);
 
@@ -1840,6 +1852,14 @@ radv_report_gpuvm_fault(struct radv_device *device)
    ac_print_gpuvm_fault_status(stderr, pdev->info.gfx_level, fault_info.status);
 }
 
+void
+radv_queue_handle_fault_state(struct radv_queue *queue)
+{
+   struct radv_device *device = radv_queue_device(queue);
+
+   radv_report_gpuvm_fault(device);
+}
+
 static VkResult
 radv_queue_sparse_submit(struct vk_queue *vqueue, struct vk_queue_submit *submission)
 {
@@ -1875,8 +1895,7 @@ fail:
        * VK_ERROR_DEVICE_LOST to ensure the clients do not attempt
        * to submit the same job again to this device.
        */
-      radv_report_gpuvm_fault(device);
-      result = vk_device_set_lost(&device->vk, "vkQueueSubmit() failed");
+      result = radv_queue_set_lost(queue, "vkQueueBindSparse() failed");
    }
    return result;
 }
@@ -1909,8 +1928,7 @@ fail:
        * VK_ERROR_DEVICE_LOST to ensure the clients do not attempt
        * to submit the same job again to this device.
        */
-      radv_report_gpuvm_fault(device);
-      result = vk_device_set_lost(&device->vk, "vkQueueSubmit() failed");
+      result = radv_queue_set_lost(queue, "vkQueueSubmit() failed");
    }
    return result;
 }

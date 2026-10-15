@@ -203,6 +203,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_maintenance3                     = true,
       .KHR_maintenance4                     = true,
       .KHR_maintenance5                     = true,
+      .KHR_map_memory2                      = true,
       .KHR_multiview                        = true,
       .KHR_pipeline_executable_properties   = true,
       .KHR_separate_depth_stencil_layouts   = true,
@@ -224,6 +225,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_shader_integer_dot_product       = true,
       .KHR_shader_terminate_invocation      = true,
       .KHR_synchronization2                 = true,
+      .KHR_unified_image_layouts            = true,
       .KHR_workgroup_memory_explicit_layout = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .KHR_swapchain                        = true,
@@ -584,6 +586,10 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_KHR_maintenance5 */
       .maintenance5 = true,
+
+      /* VK_KHR_unified_layouts */
+      .unifiedImageLayouts = true,
+      .unifiedImageLayoutsVideo = false,
 
 #ifdef V3DV_USE_WSI_PLATFORM
       /* VK_KHR_swapchain_maintenance1 */
@@ -2127,7 +2133,7 @@ v3dv_CreateDevice(VkPhysicalDevice physicalDevice,
    *pDevice = v3dv_device_to_handle(device);
    v3dv_utrace_context_init(device);
 #ifdef HAVE_PERFETTO
-   v3dv_utrace_perfetto_init(device, V3DV_UTRACE_PERFETTO_QUEUE_COUNT);
+   v3dv_utrace_perfetto_init(device, V3D_UTRACE_QUEUE_COUNT);
 #endif
 
    return VK_SUCCESS;
@@ -2324,11 +2330,12 @@ device_import_bo(struct v3dv_device *device,
 
    v3dv_bo_init_import(*bo, handle, size, get_offset.offset, obj_type, obj_handle, false);
 
-   v3dv_emit_device_memory_report(&device->vk, VK_SUCCESS,
-                                  true, /* is_alloc */
-                                  true, /* is_import */
-                                  handle, (*bo)->size,
-                                  obj_type, obj_handle);
+   vk_device_memory_report_emit(&device->vk, VK_SUCCESS,
+                                true, /* is_alloc */
+                                true, /* is_import */
+                                handle, (*bo)->size,
+                                obj_type, obj_handle,
+                                0 /* heap_index */);
    return VK_SUCCESS;
 }
 
@@ -2459,12 +2466,13 @@ v3dv_AllocateMemory(VkDevice _device,
    uint64_t heap_used = p_atomic_read(&pdevice->heap_used);
    if (unlikely(alloc_size > MAX_MEMORY_ALLOCATION_SIZE + 4096u ||
       heap_used + alloc_size > pdevice->memory.memoryHeaps[0].size)) {
-      v3dv_emit_device_memory_report(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                                     true, /* is_alloc */
-                                     false, /* is_import */
-                                     0, /* mem_obj_id */
-                                     alloc_size, VK_OBJECT_TYPE_DEVICE_MEMORY,
-                                     0 /* obj_handle */ );
+      vk_device_memory_report_emit(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                                   true, /* is_alloc */
+                                   false, /* is_import */
+                                   0, /* mem_obj_id */
+                                   alloc_size, VK_OBJECT_TYPE_DEVICE_MEMORY,
+                                   0, /* obj_handle */
+                                   0 /* heap_index */);
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
@@ -2570,20 +2578,19 @@ v3dv_AllocateMemory(VkDevice _device,
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-v3dv_MapMemory(VkDevice _device,
-               VkDeviceMemory _memory,
-               VkDeviceSize offset,
-               VkDeviceSize size,
-               VkMemoryMapFlags flags,
-               void **ppData)
+v3dv_MapMemory2KHR(VkDevice _device,
+                   const VkMemoryMapInfoKHR *pMemoryMapInfo,
+                   void **ppData)
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
-   V3DV_FROM_HANDLE(v3dv_device_memory, mem, _memory);
+   V3DV_FROM_HANDLE(v3dv_device_memory, mem, pMemoryMapInfo->memory);
 
    if (mem == NULL) {
       *ppData = NULL;
       return VK_SUCCESS;
    }
+
+   const VkDeviceSize offset = pMemoryMapInfo->offset;
 
    assert(offset < mem->bo->size);
 
@@ -2600,17 +2607,18 @@ v3dv_MapMemory(VkDevice _device,
    return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-v3dv_UnmapMemory(VkDevice _device,
-                 VkDeviceMemory _memory)
+VKAPI_ATTR VkResult VKAPI_CALL
+v3dv_UnmapMemory2KHR(VkDevice _device,
+                     const VkMemoryUnmapInfoKHR *pMemoryUnmapInfo)
 {
    V3DV_FROM_HANDLE(v3dv_device, device, _device);
-   V3DV_FROM_HANDLE(v3dv_device_memory, mem, _memory);
+   V3DV_FROM_HANDLE(v3dv_device_memory, mem, pMemoryUnmapInfo->memory);
 
    if (mem == NULL)
-      return;
+      return VK_SUCCESS;
 
    device_unmap(device, mem);
+   return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

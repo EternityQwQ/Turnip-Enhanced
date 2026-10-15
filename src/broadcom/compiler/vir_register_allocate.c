@@ -704,20 +704,29 @@ interferes(int32_t t0_start, int32_t t0_end, int32_t t1_start, int32_t t1_end)
 static void
 v3d_update_spill_graph(struct v3d_compile *c,
                        uint32_t first_new_temp,
-                       bool spill_base_edges_dirty)
+                       bool spill_base_edges_dirty,
+                       uint32_t num_temps_before_spills)
 {
         assert(first_new_temp <= c->num_temps);
-        vir_calculate_live_intervals(c);
+
+        vir_update_live_intervals_after_spill(c, num_temps_before_spills);
         assert(c->live_intervals_valid);
 
         uint32_t sb_temp = 0;
         uint32_t sb_node = 0;
+        bool update_spill_base_edges = false;
         if (spill_base_edges_dirty) {
                 assert(c->spill_base.file == QFILE_TEMP);
                 assert(c->spill_base.index < c->num_temps);
                 sb_temp = c->spill_base.index;
                 sb_node = temp_to_node(c, sb_temp);
                 assert(c->temp_end[sb_temp] != -1);
+
+                /* We only need a separate edge update when spill_base predates
+                 * this spill batch. If it was created by the batch, it is one
+                 * of the new temps covered by the interference loop below.
+                 */
+                update_spill_base_edges = sb_temp < first_new_temp;
         }
 
         /* Add interferences for the new spilled temps and update interferences
@@ -741,7 +750,7 @@ v3d_update_spill_graph(struct v3d_compile *c,
                         }
                 }
 
-                if (spill_base_edges_dirty && i != sb_temp &&
+                if (update_spill_base_edges && i != sb_temp &&
                     interferes(c->temp_start[i], c->temp_end[i],
                                c->temp_start[sb_temp], c->temp_end[sb_temp])) {
                         ra_add_node_interference(c->g, node_i, sb_node);
@@ -754,7 +763,8 @@ v3d_spill_reg(struct v3d_compile *c,
               int *acc_nodes,
               int *implicit_rf_nodes,
               int spill_temp,
-              bool defer_graph_update)
+              bool defer_graph_update,
+              uint32_t num_temps_before_spills)
 {
         assert(!defer_graph_update ||
                !c->devinfo->has_accumulators);
@@ -999,7 +1009,8 @@ v3d_spill_reg(struct v3d_compile *c,
 
         if (!defer_graph_update) {
                 v3d_update_spill_graph(c, c->spill_start_num_temps,
-                                       spill_type == SPILL_TYPE_TMU);
+                                       spill_type == SPILL_TYPE_TMU,
+                                       num_temps_before_spills);
         }
 
         c->disable_ldunif_opt = had_disable_ldunif_opt;
@@ -1156,7 +1167,8 @@ v3d_ra_select_rf(struct v3d_ra_select_callback_data *v3d_ra,
 }
 
 static unsigned int
-v3d_ra_select_callback(unsigned int n, BITSET_WORD *regs, void *data)
+v3d_ra_select_callback(unsigned int n, BITSET_WORD *regs, void *data,
+                       UNUSED bool optimistic)
 {
         struct v3d_ra_select_callback_data *v3d_ra = data;
 
@@ -1564,7 +1576,10 @@ v3d_register_allocate(struct v3d_compile *c)
                 .devinfo = c->devinfo,
         };
 
-        vir_calculate_live_intervals(c);
+        uint32_t num_temps_before_spills = c->num_temps;
+
+        if (!c->live_intervals_valid)
+                vir_calculate_live_intervals(c);
 
         /* Convert 1, 2, 4 threads to 0, 1, 2 index.
          *
@@ -1689,7 +1704,8 @@ v3d_register_allocate(struct v3d_compile *c)
                         uint32_t temp = node_to_temp(c, node);
                         if (node != -1) {
                                 v3d_spill_reg(c, acc_nodes, implicit_rf_nodes,
-                                              temp, false);
+                                              temp, false,
+                                              num_temps_before_spills);
                                 continue;
                         }
                 }
@@ -1771,7 +1787,8 @@ v3d_register_allocate(struct v3d_compile *c)
 
                         spill_base_edges_dirty |= spill_type == SPILL_TYPE_TMU;
                         v3d_spill_reg(c, acc_nodes, implicit_rf_nodes, temp,
-                                      defer_graph_update);
+                                      defer_graph_update,
+                                      num_temps_before_spills);
                         assert(!BITSET_TEST(c->spillable, temp));
                         if (c->spills + c->fills > c->max_tmu_spills)
                                 goto spill_fail;
@@ -1787,7 +1804,8 @@ v3d_register_allocate(struct v3d_compile *c)
                         }
 #endif
                         v3d_update_spill_graph(c, first_batch_temp,
-                                               spill_base_edges_dirty);
+                                               spill_base_edges_dirty,
+                                               num_temps_before_spills);
                 }
         }
 

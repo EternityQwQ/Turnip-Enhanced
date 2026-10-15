@@ -717,6 +717,8 @@ struct v3d_compile {
         bool disable_general_tmu_sched;
         bool has_general_tmu_load;
 
+        bool robust_access_lowered;
+
         /* Minimum number of threads we are willing to use to register allocate
          * a shader with the current compilation strategy. This only prevents
          * us from lowering the thread count to register allocate successfully,
@@ -1151,6 +1153,8 @@ enum v3d_qpu_output_pack vir_get_pack(struct qinst *inst);
 
 struct qreg vir_get_temp(struct v3d_compile *c);
 void vir_calculate_live_intervals(struct v3d_compile *c);
+void vir_update_live_intervals_after_spill(struct v3d_compile *c,
+                                           uint32_t num_temps_before_spills);
 int vir_get_nsrc(struct qinst *inst);
 bool vir_has_side_effects(struct v3d_compile *c, struct qinst *inst);
 bool vir_get_add_op(struct qinst *inst, enum v3d_qpu_add_op *op);
@@ -1200,10 +1204,12 @@ bool v3d_nir_lower_null_descriptors(nir_shader *s);
 bool v3d_nir_lower_global_2x32(nir_shader *s);
 bool v3d_nir_lower_load_store_bitsize(nir_shader *s);
 bool v3d_nir_lower_algebraic(struct nir_shader *shader, const struct v3d_compile *c);
-bool v3d_nir_lower_load_output(nir_shader *s, struct v3d_compile *c);
+bool v3d_nir_lower_tlb_loads(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_blend(nir_shader *s, struct v3d_compile *c);
 
-nir_def *v3d_nir_get_tlb_color(nir_builder *b, struct v3d_compile *c, int rt, int sample);
+nir_def *v3d_nir_get_tlb_color(nir_builder *b, struct v3d_compile *c, int rt,
+                               int sample, unsigned component,
+                               unsigned num_components);
 
 void v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr);
 void v3d_vir_emit_image_load_store(struct v3d_compile *c,
