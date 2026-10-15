@@ -457,8 +457,7 @@ convert_rt_from_3d_to_2d(const struct isl_device *isl_dev,
    /* Some tilings have different swizzling between 2D/3D images. So,
     * conversion would not be possible.
     */
-   assert(!isl_tiling_is_std_y(info->surf.tiling));
-   assert(!isl_tiling_is_64(info->surf.tiling));
+   assert(!isl_tiling_is_standard(info->surf.tiling));
 
    /* Convert from 3D to 2D-array. */
    uint32_t array_pitch_el_rows = info->surf.array_pitch_el_rows;
@@ -498,17 +497,18 @@ fast_clear_surf(struct blorp_batch *batch,
    params.x1 = u_minify(surf->surf->logical_level0_px.w, level);
    params.y1 = u_minify(surf->surf->logical_level0_px.h, level);
 
-   if (batch->blorp->isl_dev->info->ver >= 20) {
-      union isl_color_value clear_color =
-         isl_color_value_swizzle_inv(surf->clear_color, swizzle);
-      if (format == ISL_FORMAT_R9G9B9E5_SHAREDEXP) {
-         clear_color.u32[0] = float3_to_rgb9e5(clear_color.f32);
-         format = ISL_FORMAT_R32_UINT;
-      } else if (format == ISL_FORMAT_L8_UNORM_SRGB) {
-         clear_color.f32[0] = util_format_linear_to_srgb_float(clear_color.f32[0]);
-         format = ISL_FORMAT_R8_UNORM;
-      }
+   union isl_color_value clear_color =
+      isl_color_value_swizzle_inv(surf->clear_color, swizzle);
+   if (format == ISL_FORMAT_R9G9B9E5_SHAREDEXP) {
+      clear_color.u32[0] = float3_to_rgb9e5(clear_color.f32);
+      format = ISL_FORMAT_R32_UINT;
+   } else if (format == ISL_FORMAT_L8_UNORM_SRGB) {
+      clear_color.f32[0] =
+         util_format_linear_to_srgb_float(clear_color.f32[0]);
+      format = ISL_FORMAT_R8_UNORM;
+   }
 
+   if (batch->blorp->isl_dev->info->ver >= 20) {
       /* Bspec 57340 (r59562):
        *
        *   Overview of Fast Clear:
@@ -552,7 +552,9 @@ fast_clear_surf(struct blorp_batch *batch,
    else
       params.op = BLORP_OP_MCS_COLOR_CLEAR;
 
-   if (!blorp_params_get_clear_kernel(batch, &params, true, true, false)) {
+   if (!blorp_params_get_clear_kernel(
+          batch, &params, true,
+          !batch->blorp->config.use_efficient_64bit, false)) {
       mesa_loge("%s: failed to get kernel", __func__);
       return;
    }
@@ -587,7 +589,7 @@ blorp_fast_clear(struct blorp_batch *batch,
                                           &start_tile_B, &end_tile_B)) {
          size_B = end_tile_B - start_tile_B;
          addr.offset += start_tile_B;
-      } else if (isl_tiling_is_64(surf->surf->tiling)) {
+      } else if (isl_tiling_is_standard(surf->surf->tiling)) {
          /* If not supported above, clear the range without redescription.
           * Thankfully, we haven't run into this outside of conformance tests.
           */
@@ -872,7 +874,7 @@ blorp_clear(struct blorp_batch *batch,
    memcpy(&params.wm_inputs.clear.clear_color, clear_color.f32,
           sizeof(float) * 4);
 
-   bool use_simd16_replicated_data = true;
+   bool use_simd16_replicated_data = !batch->blorp->config.use_efficient_64bit;
 
    /* From the SNB PRM (Vol4_Part1):
     *

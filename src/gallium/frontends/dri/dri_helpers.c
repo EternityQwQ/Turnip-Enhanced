@@ -310,10 +310,9 @@ dri_create_image_from_renderbuffer(struct dri_context *dri_ctx,
 void
 dri2_destroy_image(struct dri_image *img)
 {
-   const __DRIimageLoaderExtension *imgLoader = img->screen->image.loader;
+   const __DRIimageLoaderExtension *imgLoader = img->screen->loader.image;
 
-   if (imgLoader && imgLoader->base.version >= 4 &&
-         imgLoader->destroyLoaderImageState) {
+   if (imgLoader && imgLoader->destroyLoaderImageState) {
       imgLoader->destroyLoaderImageState(img->loader_private);
    }
 
@@ -426,23 +425,23 @@ static const struct dri2_format_mapping dri2_format_table[] = {
       { DRM_FORMAT_XBGR2101010,   __DRI_IMAGE_FORMAT_XBGR2101010,
         PIPE_FORMAT_R10G10B10X2_UNORM, 1, },
       { DRM_FORMAT_ARGB8888,      __DRI_IMAGE_FORMAT_ARGB8888,
-        PIPE_FORMAT_BGRA8888_UNORM, 1, },
+        PIPE_FORMAT_B8G8R8A8_UNORM, 1, },
       { DRM_FORMAT_BGRA8888,      PIPE_FORMAT_A8R8G8B8_UNORM,
         PIPE_FORMAT_A8R8G8B8_UNORM, 1, },
       { DRM_FORMAT_ABGR8888,      __DRI_IMAGE_FORMAT_ABGR8888,
-        PIPE_FORMAT_RGBA8888_UNORM, 1, },
+        PIPE_FORMAT_R8G8B8A8_UNORM, 1, },
       { DRM_FORMAT_RGBA8888,      PIPE_FORMAT_A8B8G8R8_UNORM,
         PIPE_FORMAT_A8B8G8R8_UNORM, 1, },
       { __DRI_IMAGE_FOURCC_SARGB8888,     __DRI_IMAGE_FORMAT_SARGB8,
-        PIPE_FORMAT_BGRA8888_SRGB, 1, },
+        PIPE_FORMAT_B8G8R8A8_SRGB, 1, },
       { DRM_FORMAT_XRGB8888,      __DRI_IMAGE_FORMAT_XRGB8888,
-        PIPE_FORMAT_BGRX8888_UNORM, 1, },
+        PIPE_FORMAT_B8G8R8X8_UNORM, 1, },
       { DRM_FORMAT_BGRX8888,      PIPE_FORMAT_X8R8G8B8_UNORM,
         PIPE_FORMAT_X8R8G8B8_UNORM, 1, },
       { DRM_FORMAT_RGB888,        __DRI_IMAGE_FORMAT_RGB888,
         PIPE_FORMAT_B8G8R8_UNORM, 1, },
       { DRM_FORMAT_XBGR8888,      __DRI_IMAGE_FORMAT_XBGR8888,
-        PIPE_FORMAT_RGBX8888_UNORM, 1, },
+        PIPE_FORMAT_R8G8B8X8_UNORM, 1, },
       { DRM_FORMAT_RGBX8888,      PIPE_FORMAT_X8B8G8R8_UNORM,
         PIPE_FORMAT_X8B8G8R8_UNORM, 1, },
       { DRM_FORMAT_BGR888,        __DRI_IMAGE_FORMAT_BGR888,
@@ -462,9 +461,9 @@ static const struct dri2_format_mapping dri2_format_table[] = {
       { DRM_FORMAT_R16,           __DRI_IMAGE_FORMAT_R16,
         PIPE_FORMAT_R16_UNORM, 1, },
       { DRM_FORMAT_GR88,          __DRI_IMAGE_FORMAT_GR88,
-        PIPE_FORMAT_RG88_UNORM, 1, },
+        PIPE_FORMAT_R8G8_UNORM, 1, },
       { DRM_FORMAT_GR1616,        __DRI_IMAGE_FORMAT_GR1616,
-        PIPE_FORMAT_RG1616_UNORM, 1, },
+        PIPE_FORMAT_R16G16_UNORM, 1, },
       { DRM_FORMAT_R16F,          PIPE_FORMAT_R16_FLOAT,
          PIPE_FORMAT_R16_FLOAT, 1 },
       { DRM_FORMAT_R32F,          PIPE_FORMAT_R32_FLOAT,
@@ -827,40 +826,6 @@ dri_query_dma_buf_formats(struct dri_screen *screen, int max, int *formats,
    }
    *count = j;
    return true;
-}
-
-
-struct dri_image *
-dri_create_image_with_modifiers(struct dri_screen *screen,
-                                 uint32_t width, uint32_t height,
-                                 uint32_t dri_format, uint32_t dri_usage,
-                                 const uint64_t *modifiers,
-                                 unsigned int modifiers_count,
-                                 void *loaderPrivate)
-{
-   if (modifiers && modifiers_count > 0) {
-      bool has_valid_modifier = false;
-      int i;
-
-      /* It's acceptable to create an image with INVALID modifier in the list,
-       * but it cannot be on the only modifier (since it will certainly fail
-       * later). While we could easily catch this after modifier creation, doing
-       * the check here is a convenient debug check likely pointing at whatever
-       * interface the client is using to build its modifier list.
-       */
-      for (i = 0; i < modifiers_count; i++) {
-         if (modifiers[i] != DRM_FORMAT_MOD_INVALID) {
-            has_valid_modifier = true;
-            break;
-         }
-      }
-      if (!has_valid_modifier)
-         return NULL;
-   }
-
-   return dri_create_image(screen, width, height, dri_format,
-                           modifiers, modifiers_count, dri_usage,
-                           loaderPrivate);
 }
 
 void

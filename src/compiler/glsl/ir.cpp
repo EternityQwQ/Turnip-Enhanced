@@ -2026,6 +2026,8 @@ ir_variable::ir_variable(const struct glsl_type *type, const char *name,
    this->data.xfb_stride = -1;
    this->data.implicit_conversion_prohibited = false;
    this->data.per_primitive = false;
+   this->data.pixel_local_storage = GLSL_PIXEL_LOCAL_STORAGE_NONE;
+   this->data.yuv = false;
 
    this->interface_type = NULL;
 

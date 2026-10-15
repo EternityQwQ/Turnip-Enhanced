@@ -1786,9 +1786,6 @@ static void si_get_ps_prolog_key(struct si_shader *shader, union si_shader_part_
    key->ps_prolog.uses_sample_coverage =
       G_0286CC_SAMPLE_COVERAGE_ENA(shader->config.spi_ps_input_addr); /* addr because the PS prolog may use it */
 
-   if (shader->key.ps.part.prolog.poly_stipple)
-      shader->info.uses_vmem_load_other = true;
-
    if (shader->info.ps_colors_read) {
       uint8_t *color = shader->selector->info.color_attr_index;
 
@@ -2113,9 +2110,8 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
          shader->config.scratch_bytes_per_wave =
             MAX2(shader->config.scratch_bytes_per_wave,
                  shader->previous_stage->config.scratch_bytes_per_wave);
+         shader->config.mem_ordered |= shader->previous_stage->config.mem_ordered;
 
-         shader->info.uses_vmem_load_other |= shader->previous_stage->info.uses_vmem_load_other;
-         shader->info.uses_vmem_sampler_or_bvh |= shader->previous_stage->info.uses_vmem_sampler_or_bvh;
          shader->info.uses_sysval_instance_id |= shader->previous_stage->info.uses_sysval_instance_id;
          shader->info.uses_sysval_base_instance |= shader->previous_stage->info.uses_sysval_base_instance;
          shader->info.uses_sysval_draw_id |= shader->previous_stage->info.uses_sysval_draw_id;

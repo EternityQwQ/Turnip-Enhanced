@@ -25,10 +25,22 @@
 
 #include <inttypes.h>
 
+#include "util/detect_os.h"
 #include "util/list.h"
+#include "util/log.h"
 #include "util/u_call_once.h"
 #include "util/u_debug.h"
 #include "util/u_vector.h"
+
+#if DETECT_OS_WINDOWS
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
+#if U_TRACE_HAS_COMPRESS
+#include <zlib.h>
+#endif
 
 #define __NEEDS_TRACE_PRIV
 #include "u_trace_priv.h"
@@ -38,9 +50,94 @@
 struct u_trace_state {
    util_once_flag once;
    FILE *trace_file;
+   /* Set instead of trace_file when MESA_GPU_TRACEFILE contains "%i": each
+    * context opens its own file with "%i" replaced by the context ID. An
+    * owned copy, with "%p" already expanded.
+    */
+   char *tracefile_template;
    enum u_trace_type enabled_traces;
+
+#if U_TRACE_HAS_COMPRESS
+   /* Shared compressed output, set instead of trace_file for a ".gz" path
+    * without "%i". Contexts drain into it under shared_out_mtx.
+    */
+   gzFile trace_file_gz;
+#endif
 };
 static struct u_trace_state u_trace_state = { .once = UTIL_ONCE_FLAG_INIT };
+
+/* Incremented for each initialized context to assign u_trace_context::id. */
+static uint32_t u_trace_context_count;
+
+/* Serializes contexts writing to a shared trace file. Taken around every
+ * printer callback and gzip drain, whether or not the output is actually
+ * shared: it is uncontended in that case and costs less than the write it
+ * wraps. Kept off the surrounding timestamp reads, which can block.
+ */
+static simple_mtx_t shared_out_mtx = SIMPLE_MTX_INITIALIZER;
+
+/* Flushes utctx->out after each batch so a crash still leaves the trace
+ * readable up to the last processed submit. For gzip output this drains the
+ * batch buffer into the gz stream and rewinds it for the next batch.
+ */
+static void
+flush_output(struct u_trace_context *utctx)
+{
+#if U_TRACE_HAS_COMPRESS
+   if (utctx->compress_gz) {
+      u_memstream_flush(&utctx->compress_mem);
+
+      simple_mtx_lock(&shared_out_mtx);
+      if (utctx->compress_buf_size > 0) {
+         gzwrite(utctx->compress_gz, utctx->compress_buf,
+                 utctx->compress_buf_size);
+         rewind(utctx->out);
+         utctx->compress_buf_size = 0;
+      }
+      gzflush(utctx->compress_gz, Z_SYNC_FLUSH);
+      simple_mtx_unlock(&shared_out_mtx);
+      return;
+   }
+#endif
+
+   fflush(utctx->out);
+}
+
+#if U_TRACE_HAS_COMPRESS
+/* Points utctx->out at a memstream buffering one batch, the bridge from the
+ * printers' FILE* to gzwrite(); flush_output() drains it into gz.
+ */
+static bool
+attach_gz_output(struct u_trace_context *utctx, gzFile gz)
+{
+   if (!u_memstream_open(&utctx->compress_mem, &utctx->compress_buf,
+                         &utctx->compress_buf_size))
+      return false;
+
+   utctx->compress_gz = gz;
+   utctx->out = u_memstream_get(&utctx->compress_mem);
+   return true;
+}
+#endif
+
+/* Closes a context's own output. A shared gz stream is closed at process
+ * exit instead, not per context.
+ */
+static void
+close_output(struct u_trace_context *utctx)
+{
+#if U_TRACE_HAS_COMPRESS
+   if (utctx->compress_gz) {
+      u_memstream_close(&utctx->compress_mem);
+      free(utctx->compress_buf);
+      if (utctx->compress_gz != u_trace_state.trace_file_gz)
+         gzclose(utctx->compress_gz);
+      return;
+   }
+#endif
+
+   fclose(utctx->out);
+}
 
 #ifdef HAVE_PERFETTO
 /**
@@ -121,7 +218,7 @@ print_txt_start(struct u_trace_context *utctx)
 static void
 print_txt_end_of_frame(struct u_trace_context *utctx)
 {
-   fprintf(utctx->out, "END OF FRAME %u\n", utctx->frame_nr);
+   fprintf(utctx->out, "END OF FRAME %u (ctx %u)\n", utctx->frame_nr, utctx->id);
 }
 
 static void
@@ -156,8 +253,7 @@ print_txt_event(struct u_trace_context *utctx,
 
    if (evt->tp->print)
       evt->tp->print(utctx->out, evt->payload, indirect);
-   else
-      fprintf(utctx->out, "\n");
+   fprintf(utctx->out, "\n");
 
    if (evt->tp->type == u_tracepoint_type_begin_range)
       utctx->indentation++;
@@ -214,11 +310,12 @@ print_csv_event(struct u_trace_context *utctx,
 {
    fprintf(utctx->out, "%u,%u,%"PRIu64",%s,",
            utctx->frame_nr, utctx->batch_nr, ns, evt->tp->name);
+   /* The ID goes last, so existing fields keep their positions. */
    if (evt->tp->print) {
       evt->tp->print(utctx->out, evt->payload, indirect);
-   } else {
-      fprintf(utctx->out, "\n");
+      fprintf(utctx->out, ", ");
    }
+   fprintf(utctx->out, "ctx=%u\n", utctx->id);
 }
 
 static struct u_trace_printer csv_printer = {
@@ -248,7 +345,8 @@ print_json_start_of_frame(struct u_trace_context *utctx)
 {
    if (utctx->frame_nr != 0)
       fprintf(utctx->out, ",\n");
-   fprintf(utctx->out, "{\n\"frame\": %u,\n", utctx->frame_nr);
+   fprintf(utctx->out, "{\n\"ctx\": %u,\n", utctx->id);
+   fprintf(utctx->out, "\"frame\": %u,\n", utctx->frame_nr);
    fprintf(utctx->out, "\"batches\": [\n");
 }
 
@@ -256,7 +354,6 @@ static void
 print_json_end_of_frame(struct u_trace_context *utctx)
 {
    fprintf(utctx->out, "]\n}\n");
-   fflush(utctx->out);
 }
 
 static void
@@ -316,13 +413,58 @@ static const struct debug_named_value config_control[] = {
    DEBUG_NAMED_VALUE_END
 };
 
-DEBUG_GET_ONCE_OPTION(trace_file, "MESA_GPU_TRACEFILE", NULL)
-
 static void
 trace_file_fini(void)
 {
-   fclose(u_trace_state.trace_file);
+   if (u_trace_state.trace_file && u_trace_state.trace_file != stdout)
+      fclose(u_trace_state.trace_file);
    u_trace_state.trace_file = NULL;
+
+#if U_TRACE_HAS_COMPRESS
+   if (u_trace_state.trace_file_gz)
+      gzclose(u_trace_state.trace_file_gz);
+   u_trace_state.trace_file_gz = NULL;
+#endif
+}
+
+/* Always defined, so we can warn on a ".gz" path in a build without
+ * compression support rather than silently writing plain text to it.
+ */
+static bool
+path_wants_compression(const char *path)
+{
+   size_t len = strlen(path);
+   return len >= 3 && !strcmp(path + len - 3, ".gz");
+}
+
+static unsigned
+trace_process_id(void)
+{
+#if DETECT_OS_WINDOWS
+   return (unsigned) GetCurrentProcessId();
+#else
+   return (unsigned) getpid();
+#endif
+}
+
+/* Returns a newly allocated copy of path with the first occurrence of token,
+ * if any, replaced by value.
+ */
+static char *
+expand_path_token(const char *path, const char *token, unsigned value)
+{
+   const char *pos = strstr(path, token);
+   if (!pos)
+      return strdup(path);
+
+   size_t len = strlen(path) + 16;
+   char *expanded = malloc(len);
+   if (!expanded)
+      return NULL;
+
+   snprintf(expanded, len, "%.*s%u%s", (int) (pos - path), path, value,
+            pos + strlen(token));
+   return expanded;
 }
 
 static void
@@ -330,22 +472,97 @@ u_trace_state_init_once(void)
 {
    u_trace_state.enabled_traces =
       debug_get_flags_option("MESA_GPU_TRACES", config_control, 0);
-   const char *tracefile_name = debug_get_option_trace_file();
+   const char *tracefile_name = debug_get_option("MESA_GPU_TRACEFILE", NULL);
+   char *expanded = NULL;
    if (tracefile_name && __normal_user()) {
-      u_trace_state.trace_file = fopen(tracefile_name, "w");
-      if (u_trace_state.trace_file != NULL) {
-         atexit(trace_file_fini);
+      /* "%p" is substituted here, before anything else looks at the name, so
+       * it applies in every mode. It separates processes, where "%i" separates
+       * contexts within one: a driver environment variable set for a whole
+       * session reaches every process in it, and their context IDs all start
+       * at zero, so without this they would name the same file and truncate
+       * each other's output.
+       */
+      expanded = expand_path_token(tracefile_name, "%p", trace_process_id());
+      if (expanded)
+         tracefile_name = expanded;
+
+#if !U_TRACE_HAS_COMPRESS
+      if (path_wants_compression(tracefile_name)) {
+         mesa_logw("u_trace: MESA_GPU_TRACEFILE requests gzip compression "
+                   "(\".gz\") but this build doesn't support it (needs "
+                   "zlib); writing uncompressed");
+      }
+#endif
+      if (strstr(tracefile_name, "%i")) {
+         /* Kept for the process lifetime, so hand ownership over. */
+         u_trace_state.tracefile_template = expanded;
+         expanded = NULL;
+#if U_TRACE_HAS_COMPRESS
+      } else if (path_wants_compression(tracefile_name)) {
+         u_trace_state.trace_file_gz = gzopen(tracefile_name, "wb");
+         if (u_trace_state.trace_file_gz)
+            atexit(trace_file_fini);
+#endif
+      } else {
+         u_trace_state.trace_file = fopen(tracefile_name, "w");
+         if (u_trace_state.trace_file != NULL) {
+            atexit(trace_file_fini);
+         }
       }
    }
-   if (!u_trace_state.trace_file) {
+   free(expanded);
+   if (!u_trace_state.trace_file && !u_trace_state.tracefile_template
+#if U_TRACE_HAS_COMPRESS
+       && !u_trace_state.trace_file_gz
+#endif
+      ) {
       u_trace_state.trace_file = stdout;
    }
+}
+
+/* Substitutes the context ID for "%i" and opens the result as utctx->out. */
+static bool
+open_tracefile_for_context(struct u_trace_context *utctx)
+{
+   char *name = expand_path_token(u_trace_state.tracefile_template, "%i",
+                                  utctx->id);
+   if (!name)
+      return false;
+
+#if U_TRACE_HAS_COMPRESS
+   if (path_wants_compression(name)) {
+      gzFile gz = gzopen(name, "wb");
+      free(name);
+      if (!gz)
+         return false;
+
+      if (!attach_gz_output(utctx, gz)) {
+         gzclose(gz);
+         return false;
+      }
+      return true;
+   }
+#endif
+
+   FILE *file = fopen(name, "w");
+   free(name);
+   utctx->out = file;
+   return file != NULL;
 }
 
 void
 u_trace_state_init(void)
 {
    util_call_once(&u_trace_state.once, u_trace_state_init_once);
+}
+
+void
+u_trace_state_reset(void)
+{
+   trace_file_fini();
+   free(u_trace_state.tracefile_template);
+   u_trace_state = (struct u_trace_state) { .once = UTIL_ONCE_FLAG_INIT };
+   u_trace_context_count = 0;
 }
 
 bool
@@ -418,6 +635,7 @@ u_trace_context_init(struct u_trace_context *utctx,
 {
    u_trace_state_init();
 
+   utctx->id = p_atomic_fetch_add(&u_trace_context_count, 1);
    utctx->enabled_traces = u_trace_state.enabled_traces;
    utctx->pctx = pctx;
    utctx->create_buffer = create_buffer;
@@ -441,8 +659,40 @@ u_trace_context_init(struct u_trace_context *utctx,
 
    util_dynarray_init(&utctx->flushed_traces, NULL);
 
+   utctx->out = NULL;
+   utctx->out_owned = false;
+#if U_TRACE_HAS_COMPRESS
+   utctx->compress_buf = NULL;
+   utctx->compress_buf_size = 0;
+   utctx->compress_gz = NULL;
+#endif
+
    if (utctx->enabled_traces & U_TRACE_TYPE_PRINT) {
-      utctx->out = u_trace_state.trace_file;
+      if (u_trace_state.tracefile_template) {
+         utctx->out_owned = open_tracefile_for_context(utctx);
+         if (!utctx->out_owned) {
+            mesa_logw("u_trace: failed to open trace file for context %u, "
+                      "falling back to stdout", utctx->id);
+         }
+      }
+#if U_TRACE_HAS_COMPRESS
+      /* A shared ".gz" needs a per-context batch buffer that drains into the
+       * one shared gz stream.
+       */
+      if (!utctx->out && u_trace_state.trace_file_gz) {
+         if (attach_gz_output(utctx, u_trace_state.trace_file_gz)) {
+            utctx->out_owned = true;
+         } else {
+            mesa_logw("u_trace: failed to allocate output buffer for "
+                      "context %u, falling back to unbuffered stdout",
+                      utctx->id);
+         }
+      }
+#endif
+      if (!utctx->out) {
+         utctx->out = u_trace_state.trace_file ? u_trace_state.trace_file
+                                               : stdout;
+      }
 
       if (utctx->enabled_traces & U_TRACE_TYPE_JSON) {
          utctx->out_printer = &json_printer;
@@ -451,8 +701,17 @@ u_trace_context_init(struct u_trace_context *utctx,
       } else {
          utctx->out_printer = &txt_printer;
       }
+
+      /* Contexts sharing a file each write their own top-level JSON array,
+       * which don't combine into a valid document; per-context files fix it.
+       */
+      if (utctx->out_printer == &json_printer && utctx->id > 0 &&
+          !(u_trace_state.tracefile_template && utctx->out_owned)) {
+         mesa_logw("u_trace: multiple contexts sharing one trace file "
+                   "produce invalid JSON, use %%i in MESA_GPU_TRACEFILE "
+                   "for a file per context");
+      }
    } else {
-      utctx->out = NULL;
       utctx->out_printer = NULL;
    }
 
@@ -477,7 +736,9 @@ u_trace_context_init(struct u_trace_context *utctx,
       return;
 
    if (utctx->out) {
+      simple_mtx_lock(&shared_out_mtx);
       utctx->out_printer->start(utctx);
+      simple_mtx_unlock(&shared_out_mtx);
    }
 }
 
@@ -503,12 +764,16 @@ u_trace_context_fini(struct u_trace_context *utctx)
    _mesa_hash_table_fini(&utctx->tracepoint_ranges, free_tracepoint_ranges_entry);
 
    if (utctx->out) {
-      if (utctx->batch_nr > 0) {
+      simple_mtx_lock(&shared_out_mtx);
+      if (!utctx->start_of_frame) {
          utctx->out_printer->end_of_frame(utctx);
       }
-
       utctx->out_printer->end(utctx);
-      fflush(utctx->out);
+      simple_mtx_unlock(&shared_out_mtx);
+
+      flush_output(utctx);
+      if (utctx->out_owned)
+         close_output(utctx);
    }
 
    free (utctx->dummy_indirect_data);
@@ -645,7 +910,9 @@ process_flush(void *job, void *gdata, int thread_index)
    if (flush->frame_nr != U_TRACE_FRAME_UNKNOWN &&
        flush->frame_nr != utctx->frame_nr) {
       if (utctx->out) {
+         simple_mtx_lock(&shared_out_mtx);
          utctx->out_printer->end_of_frame(utctx);
+         simple_mtx_unlock(&shared_out_mtx);
       }
       utctx->frame_nr = flush->frame_nr;
       utctx->start_of_frame = true;
@@ -655,13 +922,17 @@ process_flush(void *job, void *gdata, int thread_index)
       utctx->start_of_frame = false;
       utctx->batch_nr = 0;
       if (utctx->out) {
+         simple_mtx_lock(&shared_out_mtx);
          utctx->out_printer->start_of_frame(utctx);
+         simple_mtx_unlock(&shared_out_mtx);
       }
    }
 
    utctx->event_nr = 0;
    if (utctx->out) {
+      simple_mtx_lock(&shared_out_mtx);
       utctx->out_printer->start_of_batch(utctx);
+      simple_mtx_unlock(&shared_out_mtx);
    }
 
    uint64_t last_timestamp = 0;
@@ -752,7 +1023,9 @@ process_flush(void *job, void *gdata, int thread_index)
       }
 
       if (utctx->out) {
+         simple_mtx_lock(&shared_out_mtx);
          utctx->out_printer->event(utctx, event, timestamp, delta, indirect_data);
+         simple_mtx_unlock(&shared_out_mtx);
       }
 #ifdef HAVE_PERFETTO
       if (event->tp->perfetto &&
@@ -767,7 +1040,9 @@ process_flush(void *job, void *gdata, int thread_index)
    }
 
    if (utctx->out) {
+      simple_mtx_lock(&shared_out_mtx);
       utctx->out_printer->end_of_batch(utctx);
+      simple_mtx_unlock(&shared_out_mtx);
    }
 
    utctx->batch_nr++;
@@ -776,7 +1051,9 @@ process_flush(void *job, void *gdata, int thread_index)
 
    if (flush->eof) {
       if (utctx->out) {
+         simple_mtx_lock(&shared_out_mtx);
          utctx->out_printer->end_of_frame(utctx);
+         simple_mtx_unlock(&shared_out_mtx);
       }
       utctx->frame_nr++;
       utctx->start_of_frame = true;
@@ -787,6 +1064,9 @@ process_flush(void *job, void *gdata, int thread_index)
          print_ranges(utctx, &utctx->tracepoint_ranges, 0);
       }
    }
+
+   if (utctx->out)
+      flush_output(utctx);
 }
 
 static void

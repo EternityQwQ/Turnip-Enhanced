@@ -71,7 +71,7 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
       shader->config.rsrc1 = S_00B848_VGPRS(si_shader_encode_vgprs(shader)) |
                              S_00B848_SGPRS(si_shader_encode_sgprs(shader)) |
                              S_00B848_DX10_CLAMP(sscreen->info.gfx_level < GFX12) |
-                             S_00B848_MEM_ORDERED(si_shader_mem_ordered(shader)) |
+                             S_00B848_MEM_ORDERED(shader->config.mem_ordered) |
                              S_00B848_FLOAT_MODE(shader->config.float_mode) |
                              /* This is needed for CWSR, but it causes halts to work differently. */
                              S_00B848_PRIV(sscreen->info.gfx_level == GFX11);
@@ -883,7 +883,7 @@ static void si_launch_grid(struct pipe_context *ctx, const struct pipe_grid_info
       /* Indirect buffers are read through L2 on GFX9-GFX11, but not other hw. */
       if ((sctx->gfx_level <= GFX8 || sscreen->info.cp_sdma_ge_use_system_memory_scope) &&
           si_resource(info->indirect)->L2_cache_dirty) {
-         si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+         si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
          si_resource(info->indirect)->L2_cache_dirty = false;
       }
    }

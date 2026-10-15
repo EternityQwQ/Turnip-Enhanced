@@ -57,6 +57,12 @@ radeon_check_space(struct radeon_winsys *ws, struct ac_cmdbuf *cs, unsigned need
       ac_cmdbuf_opt_set_ctx_reg(__tracked_regs, reg, reg_enum, value);                                                 \
    } while (0)
 
+#define radeon_opt_set_context_reg_idx(reg, idx, reg_enum, value)                                                      \
+   do {                                                                                                                \
+      struct ac_tracked_regs *__tracked_regs = &__rcs->tracked_regs;                                                   \
+      ac_cmdbuf_opt_set_ctx_reg_idx(__tracked_regs, reg, idx, reg_enum, value);                                        \
+   } while (0)
+
 #define radeon_opt_set_context_reg2(reg, reg_enum, v1, v2)                                                             \
    do {                                                                                                                \
       struct ac_tracked_regs *__tracked_regs = &__rcs->tracked_regs;                                                   \
@@ -89,6 +95,12 @@ radeon_check_space(struct radeon_winsys *ws, struct ac_cmdbuf *cs, unsigned need
 #define radeon_set_uconfig_reg(reg, value) ac_cmdbuf_set_ucfg_reg(reg, value)
 
 #define radeon_set_uconfig_reg_idx(info, reg, idx, value) ac_cmdbuf_set_ucfg_reg_idx(info, reg, idx, value)
+
+#define radeon_opt_set_uconfig_reg_idx(info, reg, idx, reg_enum, value)                                                \
+   do {                                                                                                                \
+      struct ac_tracked_regs *__tracked_regs = &__rcs->tracked_regs;                                                   \
+      ac_cmdbuf_opt_set_ucfg_reg_idx(__tracked_regs, info, reg, idx, reg_enum, value);                                 \
+   } while (0)
 
 #define radeon_set_uconfig_perfctr_reg_seq(gfx_level, ip_type, reg, num)                                               \
    ac_cmdbuf_set_ucfg_perfctr_reg_seq(gfx_level, ip_type, reg, num)
@@ -169,32 +181,19 @@ radv_gfx12_emit_buffered_regs(const struct radv_device *device, struct radv_cmd_
    cs->buffered_sh_regs.num = 0;
 }
 
-ALWAYS_INLINE static void
-radv_cp_wait_mem(struct radv_cmd_stream *cs, const uint32_t op, const uint64_t va, const uint32_t ref,
-                 const uint32_t mask)
-{
-   assert(op == WAIT_REG_MEM_EQUAL || op == WAIT_REG_MEM_NOT_EQUAL || op == WAIT_REG_MEM_GREATER_OR_EQUAL);
-
-   if (cs->hw_ip == AMD_IP_GFX || cs->hw_ip == AMD_IP_COMPUTE) {
-      ac_emit_cp_wait_mem(cs->b, va, ref, mask, op);
-   } else if (cs->hw_ip == AMD_IP_SDMA) {
-      ac_emit_sdma_wait_mem(cs->b, op, va, ref, mask);
-   } else {
-      UNREACHABLE("unsupported queue family");
-   }
-}
-
 ALWAYS_INLINE static unsigned
 radv_cs_write_data_head(const struct radv_device *device, struct radv_cmd_stream *cs, const unsigned engine_sel,
                         const uint64_t va, const unsigned count, const bool predicating)
 {
+   const struct radv_physical_device *const pdev = radv_device_physical(device);
+
    /* Return the correct cdw at the end of the packet so the caller can assert it. */
    const unsigned cdw_end = radeon_check_space(device->ws, cs->b, 4 + count);
 
    if (cs->hw_ip == AMD_IP_COMPUTE || cs->hw_ip == AMD_IP_GFX) {
       ac_emit_cp_write_data_head(cs->b, engine_sel, V_371_MEMORY, va, count, predicating);
    } else if (cs->hw_ip == AMD_IP_SDMA) {
-      ac_emit_sdma_write_data_head(cs->b, va, count);
+      ac_emit_sdma_write_data_head(cs->b, pdev->info.sdma_ip_version, va, count);
    } else {
       UNREACHABLE("unsupported queue family");
    }
@@ -216,11 +215,12 @@ radv_cs_write_data(const struct radv_device *device, struct radv_cmd_stream *cs,
 
 void radv_cs_emit_write_event_eop(struct radv_cmd_stream *cs, enum amd_gfx_level gfx_level, unsigned event,
                                   unsigned event_flags, unsigned dst_sel, unsigned int_sel, unsigned data_sel,
-                                  uint64_t va, uint32_t new_fence, uint64_t gfx9_eop_bug_va);
+                                  uint64_t va, uint32_t new_fence, uint64_t eop_bug_va);
 
 void radv_cs_emit_cache_flush(struct radeon_winsys *ws, struct radv_cmd_stream *cs, enum amd_gfx_level gfx_level,
-                              uint32_t *flush_cnt, uint64_t flush_va, enum radv_cmd_flush_bits flush_bits,
-                              enum rgp_flush_bits *sqtt_flush_bits, uint64_t gfx9_eop_bug_va);
+                              uint32_t *flush_cnt, uint64_t flush_va, enum ac_barrier_flags flush_bits,
+                              enum ac_rgp_flush_bits *rgp_flush_bits, enum ac_pws_acquire_point pws_acquire_point,
+                              uint64_t eop_bug_va);
 
 VkResult radv_create_cmd_stream(const struct radv_device *device, const enum amd_ip_type ip_type,
                                 const bool is_secondary, struct radv_cmd_stream **cs_out);

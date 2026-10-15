@@ -202,6 +202,7 @@ radv-hawaii-vkcts-full:
   timeout: 47m
   variables:
     CI_TRON_TIMEOUT__OVERALL__MINUTES: 45
+    RADV_EXPERIMENTAL: transfer_queue
 
 radv-polaris10-vkcts-full:
   extends:

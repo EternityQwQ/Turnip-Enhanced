@@ -288,7 +288,14 @@ util_queue_thread_func(void *input)
       queue->read_idx = (queue->read_idx + 1) % queue->max_jobs;
 
       queue->num_queued--;
-      cnd_signal(&queue->has_space_cond);
+      /* With UTIL_QUEUE_INIT_WAKE_AT_HALF_EMPTY, don't wake a producer which
+       * is waiting for a free slot until the queue is half empty, otherwise
+       * it would add a single job, find the queue full again, and go back to
+       * sleep after every job we take.
+       */
+      if (!(queue->flags & UTIL_QUEUE_INIT_WAKE_AT_HALF_EMPTY) ||
+          queue->num_queued <= queue->max_jobs / 2)
+         cnd_signal(&queue->has_space_cond);
       if (job.job)
          queue->total_jobs_size -= job.job_size;
       mtx_unlock(&queue->lock);

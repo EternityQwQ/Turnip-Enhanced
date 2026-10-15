@@ -578,9 +578,12 @@ struct radv_compiler_info {
       uint32_t lower_terminate_to_discard : 1;
       uint32_t no_implicit_varying_subgroup_size : 1;
       uint32_t force_nan_preserve_min_max : 1;
+      uint32_t force_exact_glsl_fma : 1;
       uint32_t enable_custom_border_on_compute_queue : 1;
+      uint32_t gfx10_descriptor_alias_robust : 1;
       uint32_t nir_debug_info : 1;
-      uint32_t padding : 28;
+      uint32_t use_elf : 1;
+      uint32_t padding : 25;
 
       int32_t force_aniso;
 
@@ -827,8 +830,8 @@ enum radv_rt_lowering_mode {
 struct radv_shader_layout;
 enum radv_pipeline_type;
 
-void radv_shader_combine_cfg_vs_tcs(const struct radv_shader *vs, const struct radv_shader *tcs, uint32_t *rsrc1_out,
-                                    uint32_t *rsrc2_out);
+void radv_shader_combine_cfg_vs_tcs(const struct radv_device *device, const struct radv_shader *vs,
+                                    const struct radv_shader *tcs, uint32_t *rsrc1_out, uint32_t *rsrc2_out);
 
 void radv_shader_combine_cfg_vs_gs(const struct radv_device *device, const struct radv_shader *vs,
                                    const struct radv_shader *gs, uint32_t *rsrc1_out, uint32_t *rsrc2_out,

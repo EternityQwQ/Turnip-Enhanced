@@ -232,6 +232,7 @@ nvk_meta_end_compute(struct nvk_cmd_buffer *cmd,
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 1);
    P_IMMD_WORD(p, NV90C0, SET_RENDER_ENABLE_OVERRIDE, MODE_USE_RENDER_ENABLE);
 
+   nvk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
    cmd->state.cs = save->state;
 }
 
@@ -308,7 +309,7 @@ nvk_meta_resolve_rendering(struct nvk_cmd_buffer *cmd,
 static bool
 nvk_meta_image_copy_gfx_supported(struct nvk_image *img)
 {
-   if (vk_format_is_depth_or_stencil(img->vk.format))
+   if (vk_format_has_stencil(img->vk.format))
       return false;
    if (vk_format_is_compressed(img->vk.format))
       return false;
@@ -355,11 +356,15 @@ nvk_meta_copy_get_image_properties(struct nvk_image *img,
 {
    struct vk_meta_copy_image_properties props = {};
 
-   assert(!vk_format_is_depth_or_stencil(img->vk.format));
    assert(!vk_format_get_ycbcr_info(img->vk.format));
 
    unsigned blk_sz = vk_format_get_blocksize(img->vk.format);
-   props.color.view_format = vk_meta_get_uint_format_for_blk_size(blk_sz);
+   if (vk_format_is_depth_or_stencil(img->vk.format)) {
+      props.depth.view_format = img->vk.format;
+      props.stencil.view_format = img->vk.format;
+   } else {
+      props.color.view_format = vk_meta_get_uint_format_for_blk_size(blk_sz);
+   }
 
    const struct nvk_image_plane *plane = &img->planes[0];
    const struct nil_image *nil_image = &plane->nil;
@@ -486,6 +491,13 @@ nvk_cmd_copy_image_meta(struct nvk_cmd_buffer *cmd,
    struct vk_meta_copy_image_properties dst_img_props =
       nvk_meta_copy_get_image_properties(dst, true);
 
+   if (!vk_format_is_depth_or_stencil(src->vk.format)) {
+      if (dst->vk.format == VK_FORMAT_X8_D24_UNORM_PACK32)
+         src_img_props.color.view_format = VK_FORMAT_R32_UINT;
+      else if (vk_format_is_depth_or_stencil(dst->vk.format))
+         src_img_props.color.view_format = dst->vk.format;
+   }
+
    union nvk_meta_save_generic save;
    nvk_meta_begin_generic(cmd, &save, engine);
    vk_meta_copy_image(&cmd->vk, &dev->meta, pCopyImageInfo,
@@ -501,10 +513,12 @@ nvk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(nvk_image, src, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(nvk_image, dst, pCopyImageInfo->dstImage);
 
+   bool is_depth_to_color = !vk_format_is_depth_or_stencil(dst->vk.format) &&
+                            vk_format_is_depth_or_stencil(src->vk.format);
    VkQueueFlags queue_flags = nvk_cmd_buffer_queue_flags(cmd);
    if ((queue_flags & VK_QUEUE_GRAPHICS_BIT) &&
        nvk_meta_image_copy_gfx_supported(src) &&
-       nvk_meta_image_copy_gfx_supported(dst)) {
+       nvk_meta_image_copy_gfx_supported(dst) && !is_depth_to_color) {
       nvk_cmd_copy_image_meta(cmd, pCopyImageInfo,
                               VK_PIPELINE_BIND_POINT_GRAPHICS);
    } else if ((queue_flags & VK_QUEUE_COMPUTE_BIT) &&

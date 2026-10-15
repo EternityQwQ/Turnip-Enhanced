@@ -9,6 +9,9 @@
 #include "util/u_atomic.h"
 #include "util/macros.h"
 
+/* Max MSM_INFO_SET_NAME supported strlen(). This doesn't include '\0'. */
+#define FD_MSM_GEM_NAME_LENGTH 31
+
 #ifdef __cplusplus
 
 #include <tuple>

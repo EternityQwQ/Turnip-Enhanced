@@ -873,7 +873,6 @@ genX(libanv_postprocess_cs_generate)(global void *cmd_base,
 #endif
 }
 
-#if GFX_VERx10 >= 125
 static uint3
 calc_local_trace_size(uint3 global_size)
 {
@@ -922,6 +921,7 @@ genX(libanv_preprocess_rt_generate)(global void *cmd_base,
                                     uint32_t flags,
                                     uint32_t seq_idx)
 {
+#if GFX_VERx10 >= 125
    uint32_t max_count = seq_count != 0 ? min(*seq_count, max_seq_count) : max_seq_count;
 
    if (seq_idx == 0) {
@@ -1018,7 +1018,7 @@ genX(libanv_preprocess_rt_generate)(global void *cmd_base,
       },
    };
    GENX(COMPUTE_WALKER_repack)(cmd_ptr, compute_walker_template, &v);
-}
 #endif /* GFX_VERx10 >= 125 */
+}
 
 #endif /* GFX_VER >= 9 */

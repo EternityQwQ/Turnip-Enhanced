@@ -169,15 +169,16 @@ fill_coefs(struct ethosu_subgraph *subgraph,
    free(weights);
 }
 
-#define LUT_SIZE  256
-
 void
 fill_lut(struct ethosu_subgraph *subgraph,
          struct ethosu_operation *operation,
-         void *lut)
+         void *lut,
+         unsigned size)
 {
-   operation->pooling.lut.region = COEFS_REGION;
-   operation->pooling.lut.address =
-      ethosu_allocate_coefs(subgraph, LUT_SIZE);
-   memcpy(subgraph->coefs + operation->pooling.lut.address, lut, LUT_SIZE);
+   struct ethosu_address_range *range = &operation->lut;
+
+   range->region = COEFS_REGION;
+   range->address = ethosu_allocate_coefs(subgraph, size);
+   range->size = size;
+   memcpy(subgraph->coefs + range->address, lut, size);
 }

@@ -70,17 +70,66 @@ genX(CmdControlVideoCodingKHR)(VkCommandBuffer commandBuffer,
       anv_batch_emit(&cmd_buffer->batch, GENX(MI_FLUSH_DW), flush) {
          flush.VideoPipelineCacheInvalidate = 1;
       }
+
+      if (pCodingControlInfo->flags &  VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR)
+         cmd_buffer->video.vid->rc.frame_counter = 0;
    }
 
    if (pCodingControlInfo->flags &  VK_VIDEO_CODING_CONTROL_ENCODE_RATE_CONTROL_BIT_KHR) {
       const struct VkVideoEncodeRateControlInfoKHR *rate_control_info =
          vk_find_struct_const(pCodingControlInfo->pNext, VIDEO_ENCODE_RATE_CONTROL_INFO_KHR);
+      struct anv_video_session *vid = cmd_buffer->video.vid;
+      struct anv_video_rc_state *rc = &vid->rc;
 
-      /* Support for only CQP rate control for the moment */
-      assert((rate_control_info->rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DEFAULT_KHR) ||
-             (rate_control_info->rateControlMode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR));
+      vid->rc_mode = rate_control_info->rateControlMode;
 
-      cmd_buffer->video.vid->rc_mode = rate_control_info->rateControlMode;
+      if (rate_control_info->layerCount > 0) {
+         const VkVideoEncodeRateControlLayerInfoKHR *layer = &rate_control_info->pLayers[0];
+
+         rc->average_bitrate = layer->averageBitrate;
+         rc->max_bitrate = layer->maxBitrate;
+         rc->frame_rate_num = layer->frameRateNumerator;
+         rc->frame_rate_den = layer->frameRateDenominator;
+
+         rc->vbv_size_bits = rate_control_info->virtualBufferSizeInMs ?
+            rate_control_info->virtualBufferSizeInMs * layer->averageBitrate / 1000 :
+            layer->averageBitrate * 2;
+         rc->vbv_initial_fullness_bits = rate_control_info->initialVirtualBufferSizeInMs ?
+            rate_control_info->initialVirtualBufferSizeInMs * layer->averageBitrate / 1000 :
+            layer->averageBitrate;
+
+         const VkVideoEncodeH265RateControlLayerInfoKHR *h265_layer =
+            vk_find_struct_const(layer->pNext, VIDEO_ENCODE_H265_RATE_CONTROL_LAYER_INFO_KHR);
+         const VkVideoEncodeH264RateControlLayerInfoKHR *h264_layer =
+            vk_find_struct_const(layer->pNext, VIDEO_ENCODE_H264_RATE_CONTROL_LAYER_INFO_KHR);
+         if (h265_layer) {
+            if (h265_layer->useMinQp)
+               rc->min_qp = MIN3(h265_layer->minQp.qpI, h265_layer->minQp.qpP, h265_layer->minQp.qpB);
+            if (h265_layer->useMaxQp)
+               rc->max_qp = MAX3(h265_layer->maxQp.qpI, h265_layer->maxQp.qpP, h265_layer->maxQp.qpB);
+         } else if (h264_layer) {
+            if (h264_layer->useMinQp)
+               rc->min_qp = MIN3(h264_layer->minQp.qpI, h264_layer->minQp.qpP, h264_layer->minQp.qpB);
+            if (h264_layer->useMaxQp)
+               rc->max_qp = MAX3(h264_layer->maxQp.qpI, h264_layer->maxQp.qpP, h264_layer->maxQp.qpB);
+         }
+      }
+
+      const VkVideoEncodeH265RateControlInfoKHR *h265_rc =
+         vk_find_struct_const(pCodingControlInfo->pNext, VIDEO_ENCODE_H265_RATE_CONTROL_INFO_KHR);
+      const VkVideoEncodeH264RateControlInfoKHR *h264_rc =
+         vk_find_struct_const(pCodingControlInfo->pNext, VIDEO_ENCODE_H264_RATE_CONTROL_INFO_KHR);
+      if (h265_rc) {
+         rc->gop_frame_count = h265_rc->gopFrameCount;
+         rc->idr_period = h265_rc->idrPeriod;
+         rc->consecutive_b_frames = h265_rc->consecutiveBFrameCount;
+         rc->rc_flags = h265_rc->flags;
+      } else if (h264_rc) {
+         rc->gop_frame_count = h264_rc->gopFrameCount;
+         rc->idr_period = h264_rc->idrPeriod;
+         rc->consecutive_b_frames = h264_rc->consecutiveBFrameCount;
+         rc->rc_flags = h264_rc->flags;
+      }
    }
 }
 
@@ -213,6 +262,28 @@ anv_h265_decode_video(struct anv_cmd_buffer *cmd_buffer,
       dpb_idx[slot_idx] = i;
    }
 
+   const StdVideoDecodeH265PictureInfo *std_pic = h265_pic_info->pStdPictureInfo;
+   bool used_by_curr[ANV_VIDEO_H265_MAX_NUM_REF_FRAME] = { false, };
+   uint8_t hcp_ref_idx[ANV_VIDEO_H265_MAX_NUM_REF_FRAME];
+   uint8_t num_active_refs = 0;
+
+   memset(hcp_ref_idx, 0xff, sizeof(hcp_ref_idx));
+
+   for (unsigned i = 0; i < STD_VIDEO_DECODE_H265_REF_PIC_SET_LIST_SIZE; i++) {
+      if (std_pic->RefPicSetStCurrBefore[i] != 0xff)
+         used_by_curr[dpb_idx[std_pic->RefPicSetStCurrBefore[i]]] = true;
+      if (std_pic->RefPicSetStCurrAfter[i] != 0xff)
+         used_by_curr[dpb_idx[std_pic->RefPicSetStCurrAfter[i]]] = true;
+      if (std_pic->RefPicSetLtCurr[i] != 0xff)
+         used_by_curr[dpb_idx[std_pic->RefPicSetLtCurr[i]]] = true;
+   }
+
+   for (unsigned i = 0; i < frame_info->referenceSlotCount; i++) {
+      if (used_by_curr[i])
+         hcp_ref_idx[i] = num_active_refs++;
+   }
+   assert(num_active_refs <= ANV_VIDEO_H265_HCP_NUM_REF_FRAME);
+
    /* Second-level batch buffer that the HuC S2L kernel fills with HCP slice
     * commands at execution time.
     */
@@ -234,7 +305,7 @@ anv_h265_decode_video(struct anv_cmd_buffer *cmd_buffer,
 
    huc_second_bb = anv_cmd_buffer_temporary_state_address(cmd_buffer, bb_state);
    genX(h265_huc_s2l)(cmd_buffer, frame_info, h265_pic_info, sps, pps,
-                      dpb_idx, huc_second_bb);
+                      dpb_idx, hcp_ref_idx, huc_second_bb);
 
    anv_batch_emit(&cmd_buffer->batch, GENX(MI_FLUSH_DW), flush) {
       flush.VideoPipelineCacheInvalidate = 1;
@@ -355,7 +426,10 @@ anv_h265_decode_video(struct anv_cmd_buffer *cmd_buffer,
             continue;
          dpb_idx[slot_idx] = i;
 
-         buf.ReferencePictureAddress[i] =
+         if (hcp_ref_idx[i] == 0xff)
+            continue;
+
+         buf.ReferencePictureAddress[hcp_ref_idx[i]] =
             anv_image_dpb_address(ref_iv, frame_info->pReferenceSlots[i].pPictureResource->baseArrayLayer);
       }
 
@@ -382,7 +456,10 @@ anv_h265_decode_video(struct anv_cmd_buffer *cmd_buffer,
          const struct anv_image_view *ref_iv =
             anv_image_view_from_handle(frame_info->pReferenceSlots[i].pPictureResource->imageViewBinding);
 
-         buf.CollocatedMVTemporalBufferAddress[i] =
+         if (hcp_ref_idx[i] == 0xff)
+            continue;
+
+         buf.CollocatedMVTemporalBufferAddress[hcp_ref_idx[i]] =
             anv_image_dmv_top_address(ref_iv, frame_info->pReferenceSlots[i].pPictureResource->baseArrayLayer);
       }
 
@@ -421,16 +498,17 @@ anv_h265_decode_video(struct anv_cmd_buffer *cmd_buffer,
 #endif
    }
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(HCP_IND_OBJ_BASE_ADDR_STATE), indirect) {
-      indirect.HCPIndirectBitstreamObjectBaseAddress =
-         anv_address_add(src_buffer->address, frame_info->srcBufferOffset & ~4095);
+      indirect.HCPIndirectBitstreamObjectBaseAddress = anv_address_align_down(src_addr, 4096);
 
       indirect.HCPIndirectBitstreamObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
 
       indirect.HCPIndirectBitstreamObjectAccessUpperBound =
-         anv_address_add(src_buffer->address,
-                         align64(frame_info->srcBufferRange + frame_info->srcBufferOffset, 4096));
+         anv_address_align(anv_address_add(src_addr, frame_info->srcBufferRange), 4096);
 
       indirect.HCPIndirectCUObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, NULL);
@@ -777,9 +855,11 @@ anv_h264_decode_video(struct anv_cmd_buffer *cmd_buffer,
          ANV_VID_ATTR(cmd_buffer->device, ref_bo);
    }
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(MFX_IND_OBJ_BASE_ADDR_STATE), index_obj) {
-      index_obj.MFXIndirectBitstreamObjectAddress = anv_address_add(src_buffer->address,
-                                                                    frame_info->srcBufferOffset & ~4095);
+      index_obj.MFXIndirectBitstreamObjectAddress = anv_address_align_down(src_addr, 4096);
       index_obj.MFXIndirectBitstreamObjectAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
       index_obj.MFXIndirectMVObjectAttributes =
@@ -948,7 +1028,7 @@ anv_h264_decode_video(struct anv_cmd_buffer *cmd_buffer,
       avc_directmode.POCList[33] = h264_pic_info->pStdPictureInfo->PicOrderCnt[1];
    }
 
-   uint32_t buffer_offset = frame_info->srcBufferOffset & 4095;
+   uint32_t buffer_offset = anv_address_physical(src_addr) & 4095;
 #define HEADER_OFFSET 3
    for (unsigned s = 0; s < h264_pic_info->sliceCount; s++) {
       bool last_slice = s == (h264_pic_info->sliceCount - 1);
@@ -1017,14 +1097,6 @@ enum av1_gm_type
    AV1_AFFINE,
 };
 
-static const uint32_t btdl_cache_offset = 0;
-static const uint32_t smvl_cache_offset = 128;
-static const uint32_t ipdl_cache_offset = 384;
-static const uint32_t dfly_cache_offset = 640;
-static const uint32_t dflu_cache_offset = 1344;
-static const uint32_t dflv_cache_offset = 1536;
-static const uint32_t cdef_cache_offset = 1728;
-
 static const uint32_t av1_max_qindex          = 255;
 static const uint32_t av1_num_qm_levels       = 16;
 static const uint32_t av1_scaling_factor      = (1 << 14);
@@ -1071,19 +1143,13 @@ frame_is_key_or_intra(const StdVideoAV1FrameType frame_type)
 }
 
 static int32_t
-get_relative_dist(const VkVideoDecodeAV1PictureInfoKHR *av1_pic_info,
-                  const StdVideoAV1SequenceHeader *seq_hdr,
+get_relative_dist(const StdVideoAV1SequenceHeader *seq_hdr,
                   int32_t a, int32_t b)
 {
    if (!seq_hdr->flags.enable_order_hint)
       return 0;
 
-   int32_t bits = seq_hdr->order_hint_bits_minus_1 + 1;
-   int32_t diff = a - b;
-   int32_t m = 1 << (bits - 1);
-   diff = (diff & (m - 1)) - (diff & m);
-
-   return diff;
+   return anv_av1_relative_dist(1 << seq_hdr->order_hint_bits_minus_1, a, b);
 }
 
 struct av1_refs_info {
@@ -1173,7 +1239,7 @@ anv_av1_decode_dummy(struct anv_cmd_buffer *cmd_buffer)
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, BitstreamLineRowstoreBuffer,
-                            cmd_buffer->device, btdl_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_BTDL_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, BitstreamLineRowstoreBuffer,
                           cmd_buffer->device, vid,
@@ -1186,7 +1252,7 @@ anv_av1_decode_dummy(struct anv_cmd_buffer *cmd_buffer)
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, IntraPredictionLineRowstoreBuffer,
-                            cmd_buffer->device, ipdl_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_IPDL_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, IntraPredictionLineRowstoreBuffer,
                           cmd_buffer->device, vid,
@@ -1198,7 +1264,7 @@ anv_av1_decode_dummy(struct anv_cmd_buffer *cmd_buffer)
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, SpatialMotionVectorLineBuffer,
-                            cmd_buffer->device, smvl_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_SMVL_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, SpatialMotionVectorLineBuffer,
                           cmd_buffer->device, vid,
@@ -1227,7 +1293,7 @@ anv_av1_decode_dummy(struct anv_cmd_buffer *cmd_buffer)
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineYBuffer,
-                            cmd_buffer->device, dfly_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_DFLY_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, DeblockerFilterLineYBuffer, cmd_buffer->device,
                           vid, ANV_VID_MEM_AV1_DEBLOCKER_FILTER_LINE_Y);
@@ -1235,14 +1301,14 @@ anv_av1_decode_dummy(struct anv_cmd_buffer *cmd_buffer)
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineUBuffer,
-                            cmd_buffer->device, dflu_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_DFLU_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, DeblockerFilterLineUBuffer, cmd_buffer->device,
                           vid, ANV_VID_MEM_AV1_DEBLOCKER_FILTER_LINE_U);
       }
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineVBuffer,
-                            cmd_buffer->device, dflv_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_DFLV_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, DeblockerFilterLineVBuffer, cmd_buffer->device,
                           vid, ANV_VID_MEM_AV1_DEBLOCKER_FILTER_LINE_V);
@@ -1273,7 +1339,7 @@ anv_av1_decode_dummy(struct anv_cmd_buffer *cmd_buffer)
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, CDEFFilterLineBuffer, cmd_buffer->device,
-                            cdef_cache_offset * 64);
+                            ANV_AV1_ROWSTORE_CDEF_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, CDEFFilterLineBuffer, cmd_buffer->device, vid,
                           ANV_VID_MEM_AV1_CDEF_FILTER_LINE);
@@ -1645,7 +1711,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, BitstreamLineRowstoreBuffer,
-                            cmd_buffer->device, btdl_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_BTDL_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, BitstreamLineRowstoreBuffer,
                           cmd_buffer->device, vid,
@@ -1658,7 +1724,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, IntraPredictionLineRowstoreBuffer,
-                            cmd_buffer->device, ipdl_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_IPDL_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, IntraPredictionLineRowstoreBuffer,
                           cmd_buffer->device, vid,
@@ -1670,7 +1736,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, SpatialMotionVectorLineBuffer,
-                            cmd_buffer->device, smvl_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_SMVL_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, SpatialMotionVectorLineBuffer,
                           cmd_buffer->device, vid,
@@ -1699,7 +1765,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineYBuffer,
-                            cmd_buffer->device, dfly_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_DFLY_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, DeblockerFilterLineYBuffer, cmd_buffer->device,
                           vid, ANV_VID_MEM_AV1_DEBLOCKER_FILTER_LINE_Y);
@@ -1707,14 +1773,14 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineUBuffer,
-                            cmd_buffer->device, dflu_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_DFLU_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, DeblockerFilterLineUBuffer, cmd_buffer->device,
                           vid, ANV_VID_MEM_AV1_DEBLOCKER_FILTER_LINE_U);
       }
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, DeblockerFilterLineVBuffer,
-                            cmd_buffer->device, dflv_cache_offset * 64);
+                            cmd_buffer->device, ANV_AV1_ROWSTORE_DFLV_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, DeblockerFilterLineVBuffer, cmd_buffer->device,
                           vid, ANV_VID_MEM_AV1_DEBLOCKER_FILTER_LINE_V);
@@ -1745,7 +1811,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
       if (use_internal_cache_mem) {
          ANV_VID_CACHE_INIT(buf, CDEFFilterLineBuffer, cmd_buffer->device,
-                            cdef_cache_offset * 64);
+                            ANV_AV1_ROWSTORE_CDEF_OFFSET);
       } else {
          ANV_VID_MEM_INIT(buf, CDEFFilterLineBuffer, cmd_buffer->device, vid,
                           ANV_VID_MEM_AV1_CDEF_FILTER_LINE);
@@ -1911,9 +1977,11 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 #endif
    };
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(AVP_IND_OBJ_BASE_ADDR_STATE), ind) {
-      ind.AVPIndirectBitstreamObjectBaseAddress = anv_address_add(src_buffer->address,
-                                                                  frame_info->srcBufferOffset & ~4095);
+      ind.AVPIndirectBitstreamObjectBaseAddress = anv_address_align_down(src_addr, 4096);
       ind.AVPIndirectBitstreamObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
 #if GFX_VERx10 >= 125
@@ -1934,11 +2002,11 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
    for (enum av1_ref_frame r = AV1_LAST_FRAME; r <= AV1_ALTREF_FRAME; r++) {
       if (seq_hdr->flags.enable_order_hint &&
           !frame_is_key_or_intra(std_pic_info->frame_type)) {
-         if (get_relative_dist(av1_pic_info, seq_hdr,
+         if (get_relative_dist(seq_hdr,
                                ref_info[r].order_hint, ref_info[AV1_INTRA_FRAME].order_hint) > 0)
             ref_frame_sign_bias |= (1 << r);
 
-         if ((get_relative_dist(av1_pic_info, seq_hdr,
+         if ((get_relative_dist(seq_hdr,
                                 ref_info[r].order_hint, ref_info[AV1_INTRA_FRAME].order_hint) > 0) ||
              ref_info[r].order_hint == ref_info[AV1_INTRA_FRAME].order_hint)
             ref_frame_side |= (1 << r);
@@ -1967,7 +2035,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
          }
       }
 
-      if (get_relative_dist(av1_pic_info, seq_hdr,
+      if (get_relative_dist(seq_hdr,
                             ref_info[AV1_BWDREF_FRAME].order_hint,
                             ref_info[AV1_INTRA_FRAME].order_hint) > 0 &&
           !frame_is_key_or_intra(ref_info[AV1_BWDREF_FRAME - AV1_LAST_FRAME + 1].frame_type) &&
@@ -1975,7 +2043,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
          mfmv_ref[num_mfmv++] = AV1_BWDREF_FRAME - AV1_LAST_FRAME;
       }
 
-      if (get_relative_dist(av1_pic_info, seq_hdr,
+      if (get_relative_dist(seq_hdr,
                             ref_info[AV1_ALTREF2_FRAME].order_hint,
                             ref_info[AV1_INTRA_FRAME].order_hint) > 0 &&
           !frame_is_key_or_intra(ref_info[AV1_ALTREF2_FRAME - AV1_LAST_FRAME + 1].frame_type) &&
@@ -1984,7 +2052,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
       }
 
       if (num_mfmv < total &&
-          get_relative_dist(av1_pic_info, seq_hdr,
+          get_relative_dist(seq_hdr,
                             ref_info[AV1_ALTREF_FRAME].order_hint,
                             ref_info[AV1_INTRA_FRAME].order_hint) > 0 &&
           !frame_is_key_or_intra(ref_info[AV1_ALTREF_FRAME - AV1_LAST_FRAME + 1].frame_type) &&
@@ -2455,7 +2523,7 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 
    anv_batch_emit(&cmd_buffer->batch, GENX(AVP_BSD_OBJECT), bsd) {
       bsd.TileIndirectBSDDataLength = av1_pic_info->pTileSizes[tile_idx];
-      bsd.TileIndirectDataStartAddress = (frame_info->srcBufferOffset & 4095) +
+      bsd.TileIndirectDataStartAddress = (anv_address_physical(src_addr) & 4095) +
                                          av1_pic_info->pTileOffsets[tile_idx];
    };
 
@@ -2490,8 +2558,8 @@ anv_av1_decode_video_tile(struct anv_cmd_buffer *cmd_buffer,
 static void
 anv_av1_tiles_info(const VkVideoDecodeInfoKHR *frame_info,
                    const StdVideoAV1SequenceHeader *seq_hdr,
-                   uint16_t (*tile_col_start_sb)[64],
-                   uint16_t (*tile_row_start_sb)[64])
+                   uint16_t (*tile_col_start_sb)[STD_VIDEO_AV1_MAX_TILE_COLS + 1],
+                   uint16_t (*tile_row_start_sb)[STD_VIDEO_AV1_MAX_TILE_ROWS + 1])
 {
    const VkVideoDecodeAV1PictureInfoKHR *av1_pic_info =
       vk_find_struct_const(frame_info->pNext, VIDEO_DECODE_AV1_PICTURE_INFO_KHR);
@@ -2634,8 +2702,8 @@ anv_av1_decode_video(struct anv_cmd_buffer *cmd_buffer,
    struct vk_video_session_parameters *params = cmd_buffer->video.params;
    const StdVideoAV1SequenceHeader *seq_hdr;
 
-   uint16_t tile_col_start_sb[64] = { 0, };
-   uint16_t tile_row_start_sb[64] = { 0, };
+   uint16_t tile_col_start_sb[STD_VIDEO_AV1_MAX_TILE_COLS + 1] = { 0, };
+   uint16_t tile_row_start_sb[STD_VIDEO_AV1_MAX_TILE_ROWS + 1] = { 0, };
 
    vk_video_get_av1_parameters(&vid->vk, params, frame_info, &seq_hdr);
 
@@ -3235,9 +3303,11 @@ anv_vp9_decode_video(struct anv_cmd_buffer *cmd_buffer,
 #endif
    }
 
+   struct anv_address src_addr =
+      anv_address_add(src_buffer->address, frame_info->srcBufferOffset);
+
    anv_batch_emit(&cmd_buffer->batch, GENX(HCP_IND_OBJ_BASE_ADDR_STATE), indirect) {
-      indirect.HCPIndirectBitstreamObjectBaseAddress =
-         anv_address_add(src_buffer->address, frame_info->srcBufferOffset & ~4095);
+      indirect.HCPIndirectBitstreamObjectBaseAddress = anv_address_align_down(src_addr, 4096);
 
       indirect.HCPIndirectBitstreamObjectAddressAttributes =
          ANV_VID_ATTR(cmd_buffer->device, src_buffer->address.bo);
@@ -3466,7 +3536,7 @@ anv_vp9_decode_video(struct anv_cmd_buffer *cmd_buffer,
 
    anv_batch_emit(&cmd_buffer->batch, GENX(HCP_BSD_OBJECT), bsd) {
       bsd.IndirectBSDDataLength = frame_info->srcBufferRange - vp9_pic_info->compressedHeaderOffset;
-      bsd.IndirectBSDDataStartAddress = (frame_info->srcBufferOffset & 4095) + vp9_pic_info->compressedHeaderOffset;
+      bsd.IndirectBSDDataStartAddress = (anv_address_physical(src_addr) & 4095) + vp9_pic_info->compressedHeaderOffset;
    }
 
 #if GFX_VER >= 12

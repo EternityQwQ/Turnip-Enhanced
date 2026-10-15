@@ -17,11 +17,6 @@
 #include "fdl/fd6_format_table.h"
 #include "tu_device.h"
 #include "tu_image.h"
-#include "util/detect_os.h"
-
-#if DETECT_OS_ANDROID
-#include <hardware/gralloc.h>
-#endif
 
 static bool
 tu6_format_vtx_supported(enum pipe_format format)
@@ -44,52 +39,6 @@ static bool
 tu6_format_color_supported(const struct fd_dev_info *info, enum pipe_format format)
 {
    return fd6_color_format_supported(info, format, TILE6_LINEAR);
-}
-
-bool
-tu_external_format_resolve_supported(const struct fd_dev_info *info,
-                                     VkFormat format,
-                                     enum a6xx_tile_mode tile_mode)
-{
-   const struct vk_format_ycbcr_info *ycbcr_info =
-      vk_format_get_ycbcr_info(format);
-
-   /* The first implementation uses an R8G8B8A8_UNORM intermediate.  Do not
-    * advertise higher bit depths until their packed plane formats can be
-    * written directly by FDL/R3D without changing their bit placement.
-    * Multiplanar format descriptions do not model conventional RGBA component
-    * indices, so use the format-wide BPC helper instead.
-    */
-   if (!ycbcr_info || ycbcr_info->n_planes > TU_MAX_PLANE_COUNT ||
-       vk_format_get_bpc(format) != 8)
-      return false;
-
-   if (tile_mode != TILE6_LINEAR && tile_mode != TILE6_3)
-      return false;
-
-   /* Turnip does not implement tiled, non-UBWC layouts for formats for which
-    * tiling is impossible (notably three-plane 4:2:0).
-    */
-   if (tile_mode != TILE6_LINEAR && !tiling_possible(format))
-      return false;
-
-   const enum pipe_format color_format = PIPE_FORMAT_R8G8B8A8_UNORM;
-   if (!fd6_color_format_supported(info, color_format, TILE6_3) ||
-       !fd6_texture_format_supported(info, color_format, TILE6_3, false))
-      return false;
-
-   for (uint32_t i = 0; i < ycbcr_info->n_planes; i++) {
-      if (!ycbcr_info->planes[i].denominator_scales[0] ||
-          !ycbcr_info->planes[i].denominator_scales[1])
-         return false;
-
-      const enum pipe_format plane_format = tu6_plane_format(format, i);
-      if (!fd6_color_format_supported(info, plane_format, tile_mode) ||
-          !fd6_texture_format_supported(info, plane_format, tile_mode, false))
-         return false;
-   }
-
-   return true;
 }
 
 struct tu_native_format
@@ -148,7 +97,7 @@ tu6_mutable_format_list_ubwc_compatible(const struct fd_dev_info *info,
    return true;
 }
 
-static bool
+bool
 tu_format_linear_filtering_supported(struct tu_physical_device *physical_device,
                                      VkFormat vk_format)
 {
@@ -248,8 +197,7 @@ tu_physical_device_get_format_properties(
          if (ycbcr_info->n_planes > 1) {
             optimal |= VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT |
                        VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT;
-            if (physical_device->info->props.has_separate_chroma_filter &&
-                !tu_format_uses_software_ycbcr(vk_format))
+            if (physical_device->info->props.has_separate_chroma_filter)
                optimal |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_SEPARATE_RECONSTRUCTION_FILTER_BIT;
          }
       } else {
@@ -392,8 +340,7 @@ tu_physical_device_get_format_properties(
        /* We don't actually support tiling for this format, but we need to
         * fake it as it's required by VK_KHR_sampler_ycbcr_conversion.
         */
-       vk_format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM &&
-       vk_format != VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16) {
+       vk_format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM) {
       optimal = 0;
    }
 
@@ -787,72 +734,6 @@ tu_get_image_format_properties(
    return VK_SUCCESS;
 }
 
-/* Android native-buffer v11 gets its producer usage from
- * vkGetPhysicalDeviceImageFormatProperties2(), rather than either of the
- * legacy VK_ANDROID_native_buffer gralloc-usage entrypoints.  Keep the UBWC
- * decision independent of that entrypoint so the v11 and legacy paths cannot
- * silently diverge.
- *
- * The caller must already have validated the base image-format query.  These
- * additional checks cover constraints which would make tu_image_init() choose
- * a linear or non-UBWC layout.  In particular, never ask gralloc for a QCOM
- * modifier which image creation would later have to override.
- */
-static bool
-tu_android_gralloc_ubwc_possible_for_valid_format(
-   struct tu_physical_device *physical_device,
-   const VkPhysicalDeviceImageFormatInfo2 *info)
-{
-   if (TU_DEBUG(NOUBWC) ||
-       !vk_android_gralloc_supports_qcom_swapchain_ubwc() ||
-       info->tiling != VK_IMAGE_TILING_OPTIMAL ||
-       info->type != VK_IMAGE_TYPE_2D ||
-       !tiling_possible(info->format) ||
-       (info->flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) ||
-       (info->usage &
-        (VK_IMAGE_USAGE_STORAGE_BIT |
-         VK_IMAGE_USAGE_FRAGMENT_DENSITY_MAP_BIT_EXT |
-         VK_IMAGE_USAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR)))
-      return false;
-
-   const VkImageCompressionControlEXT *compression_control =
-      vk_find_struct_const(info->pNext, IMAGE_COMPRESSION_CONTROL_EXT);
-   if (compression_control &&
-       (compression_control->flags & VK_IMAGE_COMPRESSION_DISABLED_EXT))
-      return false;
-
-   if (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {
-      const VkImageFormatListCreateInfo *format_list =
-         vk_find_struct_const(info->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
-
-      /* Android's v11 producer-usage query currently does not forward the
-       * swapchain format list.  Without it, Turnip cannot prove that every
-       * eventual view has a UBWC-compatible interpretation, so fail closed.
-       */
-      if (!tu6_mutable_format_list_ubwc_compatible(physical_device->info,
-                                                   format_list))
-         return false;
-   }
-
-   return ubwc_possible(NULL, info->format, info->type, info->flags,
-                        info->usage, info->usage, physical_device->info,
-                        VK_SAMPLE_COUNT_1_BIT, 1, false);
-}
-
-bool
-tu_android_gralloc_ubwc_possible(
-   struct tu_physical_device *physical_device,
-   const VkPhysicalDeviceImageFormatInfo2 *info)
-{
-   VkImageFormatProperties image_format_properties;
-   VkResult result = tu_get_image_format_properties(
-      physical_device, info, &image_format_properties, NULL);
-
-   return result == VK_SUCCESS &&
-          tu_android_gralloc_ubwc_possible_for_valid_format(physical_device,
-                                                            info);
-}
-
 static VkResult
 tu_get_external_image_format_properties(
    const struct tu_physical_device *physical_device,
@@ -943,16 +824,16 @@ tu_GetPhysicalDeviceImageFormatProperties2(
    {
       switch (sType) {
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO:
-         external_info = (const VkPhysicalDeviceExternalImageFormatInfo *) s;
+         external_info = static_cast<const VkPhysicalDeviceExternalImageFormatInfo *>(s);
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_IMAGE_FORMAT_INFO_EXT:
-         image_view_info = (const VkPhysicalDeviceImageViewImageFormatInfoEXT *) s;
+         image_view_info = static_cast<const VkPhysicalDeviceImageViewImageFormatInfoEXT *>(s);
          break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT:
-         drm_info = (const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *) s;
+         drm_info = static_cast<const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *>(s);
          break;
       case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_CONTROL_EXT:
-         compression_control = (const VkImageCompressionControlEXT *) s;
+         compression_control = static_cast<const VkImageCompressionControlEXT *>(s);
          break;
       default:
          break;
@@ -969,19 +850,19 @@ tu_GetPhysicalDeviceImageFormatProperties2(
    {
       switch (sType) {
       case VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES:
-         external_props = (VkExternalImageFormatProperties *) s;
+         external_props = static_cast<VkExternalImageFormatProperties *>(s);
          break;
       case VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT:
-         cubic_props = (VkFilterCubicImageViewImageFormatPropertiesEXT *) s;
+         cubic_props = static_cast<VkFilterCubicImageViewImageFormatPropertiesEXT *>(s);
          break;
       case VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES:
-         ycbcr_props = (VkSamplerYcbcrConversionImageFormatProperties *) s;
+         ycbcr_props = static_cast<VkSamplerYcbcrConversionImageFormatProperties *>(s);
          break;
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT:
-         hic_props = (VkHostImageCopyDevicePerformanceQueryEXT *) s;
+         hic_props = static_cast<VkHostImageCopyDevicePerformanceQueryEXT *>(s);
          break;
       case VK_STRUCTURE_TYPE_IMAGE_COMPRESSION_PROPERTIES_EXT:
-         compression_props = (VkImageCompressionPropertiesEXT *) s;
+         compression_props = static_cast<VkImageCompressionPropertiesEXT *>(s);
          break;
       default:
          break;
@@ -1022,18 +903,6 @@ tu_GetPhysicalDeviceImageFormatProperties2(
          /* AHBs with mipmap usage will ignore this property */
          props->maxMipLevels = 1;
          props->sampleCounts = VK_SAMPLE_COUNT_1_BIT;
-
-#if DETECT_OS_ANDROID
-         VkAndroidHardwareBufferUsageANDROID *ahb_usage =
-            vk_find_struct(base_props->pNext,
-                           ANDROID_HARDWARE_BUFFER_USAGE_ANDROID);
-         if (ahb_usage &&
-             tu_android_gralloc_ubwc_possible_for_valid_format(
-                physical_device, base_info)) {
-            ahb_usage->androidHardwareBufferUsage |=
-               (uint64_t) GRALLOC_USAGE_PRIVATE_0;
-         }
-#endif
       } else {
          result = tu_get_external_image_format_properties(
             physical_device, base_info, external_info->handleType,
@@ -1059,9 +928,7 @@ tu_GetPhysicalDeviceImageFormatProperties2(
    }
 
    if (ycbcr_props)
-      ycbcr_props->combinedImageSamplerDescriptorCount =
-         tu_format_uses_software_ycbcr(base_info->format) ?
-            TU_MAX_PLANE_COUNT : 1;
+      ycbcr_props->combinedImageSamplerDescriptorCount = 1;
 
    if (hic_props) {
       /* This should match tu_image_init() as much as possible given the

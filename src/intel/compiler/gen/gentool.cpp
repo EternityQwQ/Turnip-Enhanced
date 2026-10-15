@@ -515,7 +515,7 @@ build_send_desc_diagram(const intel_device_info *devinfo,
 static int
 send_dst_len(const gen_inst *inst)
 {
-   assert(inst->opcode != GEN_OP_SENDG);
+   assert(inst->opcode != GEN_OP_SENDG && inst->opcode != GEN_OP_SENDGC);
    if (inst->send.desc_is_reg)
       return -1;
    return (inst->send.desc_imm >> 20) & 0x1F;

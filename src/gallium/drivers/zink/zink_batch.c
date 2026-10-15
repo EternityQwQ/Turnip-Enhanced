@@ -1,4 +1,5 @@
 #include "zink_batch.h"
+#include "util/timespec.h"
 #include "zink_context.h"
 #include "zink_descriptors.h"
 #include "zink_kopper.h"
@@ -13,6 +14,9 @@
 #endif
 
 #define MAX_VIEW_COUNT 500
+
+/* the number of batches a context can have waiting for the flush thread before it waits too */
+#define ZINK_MAX_QUEUED_BATCHES 8
 
 void
 debug_describe_zink_batch_state(char *buf, const struct zink_batch_state *ptr)
@@ -36,6 +40,7 @@ reset_obj(struct zink_screen *screen, struct zink_batch_state *bs, struct zink_r
       obj->last_write = 0;
       obj->access_stage = 0;
       obj->unordered_access_stage = 0;
+      obj->has_ordered_access = false;
       obj->copies_need_reset = true;
       obj->unsync_access = true;
       if (obj->dt)
@@ -140,6 +145,8 @@ reset_batch_state_internal(struct zink_screen *screen, struct zink_batch_state *
       zink_fence_reference(screen, mfence, NULL);
    util_dynarray_clear(&bs->fences);
 
+   /* fence waiters read these under the usage mutex: update them together */
+   mtx_lock(&bs->usage.mtx);
    /* only increment batch generation if previously in-use to avoid false detection of batch completion */
    if (bs->fence.submitted)
       bs->usage.submit_count++;
@@ -147,9 +154,11 @@ reset_batch_state_internal(struct zink_screen *screen, struct zink_batch_state *
     * before the state is reused
     */
    bs->fence.submitted = false;
-   if (bs->fence.batch_id)
-      zink_screen_update_last_finished(screen, bs->fence.batch_id);
+   const uint64_t reset_batch_id = bs->fence.batch_id;
    bs->fence.batch_id = 0;
+   mtx_unlock(&bs->usage.mtx);
+   if (reset_batch_id)
+      zink_screen_update_last_finished(screen, reset_batch_id);
    bs->usage.usage = 0;
    bs->next = NULL;
    bs->last_added_obj = NULL;
@@ -232,7 +241,7 @@ zink_batch_state_destroy(struct zink_screen *screen, struct zink_batch_state *bs
 
    util_queue_fence_destroy(&bs->flush_completed);
 
-   cnd_destroy(&bs->usage.flush);
+   u_cnd_monotonic_destroy(&bs->usage.flush);
    mtx_destroy(&bs->usage.mtx);
 
    if (bs->cmdbuf)
@@ -361,7 +370,7 @@ create_batch_state(struct zink_context *ctx)
 
    SET_CREATE(&bs->programs);
    SET_CREATE(&bs->active_queries);
-   SET_CREATE(&bs->dmabuf_exports);
+   _mesa_hash_table_init(&bs->dmabuf_exports, bs, _mesa_hash_pointer, _mesa_key_pointer_equal);
    bs->signal_semaphores = UTIL_DYNARRAY_INIT;
    bs->user_signal_semaphores = UTIL_DYNARRAY_INIT;
    bs->user_signal_semaphore_values = UTIL_DYNARRAY_INIT;
@@ -383,7 +392,7 @@ create_batch_state(struct zink_context *ctx)
    bs->swapchain_obj_unsync = UTIL_DYNARRAY_INIT;
    bs->fence.mfences = UTIL_DYNARRAY_INIT;
 
-   cnd_init(&bs->usage.flush);
+   u_cnd_monotonic_init(&bs->usage.flush);
    mtx_init(&bs->usage.mtx, mtx_plain);
    simple_mtx_init(&bs->exportable_lock, mtx_plain);
    memset(&bs->buffer_indices_hashlist, -1, sizeof(bs->buffer_indices_hashlist));
@@ -650,11 +659,12 @@ submit_queue(void *data, void *gdata, int thread_index)
    VkSubmitInfo si[ZINK_SUBMIT_MAX] = {0};
    VkSubmitInfo *submit = si;
    int num_si = ZINK_SUBMIT_MAX;
+   bool count_submit = false;
    while (!bs->fence.batch_id)
       bs->fence.batch_id = (uint32_t)p_atomic_inc_return(&screen->curr_batch);
-   bs->usage.usage = bs->fence.batch_id;
-   assert(bs->usage.usage);
-   bs->usage.unflushed = false;
+   assert(bs->fence.batch_id);
+   p_atomic_set(&bs->usage.usage, bs->fence.batch_id);
+   p_atomic_set(&bs->usage.unflushed, false);
 
    uint64_t batch_id = bs->fence.batch_id;
    /* first submit is just for acquire waits since they have a separate array */
@@ -825,28 +835,46 @@ submit_queue(void *data, void *gdata, int thread_index)
 
    unsigned i = 0;
    VkSemaphore *sem = bs->signal_semaphores.data;
-   set_foreach(&bs->dmabuf_exports, entry) {
+   hash_table_foreach(&bs->dmabuf_exports, entry) {
       struct zink_resource *res = (void*)entry->key;
+      /* Add the batch's fence as a write fence if the batch wrote the image,
+       * otherwise as a read fence, which only later writers wait for.
+       */
       if (res->obj->exportable_dmabuf) {
+         bool write = entry->data != NULL;
          for (; res; res = zink_resource(res->base.b.next))
-            zink_screen_import_dmabuf_semaphore(screen, res, sem[i++]);
+            zink_screen_import_dmabuf_semaphore(screen, res, sem[i++], write);
       }
 
       struct pipe_resource *pres = (void*)entry->key;
       pipe_resource_reference(&pres, NULL);
    }
-   _mesa_set_clear(&bs->dmabuf_exports, NULL);
+   _mesa_hash_table_clear(&bs->dmabuf_exports, NULL);
 
    if (bs->sparse_semaphore)
       (void)util_dynarray_pop(&bs->acquires, VkSemaphore);
 
-   bs->usage.submit_count++;
+   /* submit_count is incremented together with fence.submitted below */
+   count_submit = true;
 end:
-   cnd_broadcast(&bs->usage.flush);
+   /* wake unflushed-usage waiters */
+   mtx_lock(&bs->usage.mtx);
+   u_cnd_monotonic_broadcast(&bs->usage.flush);
+   mtx_unlock(&bs->usage.mtx);
 
    post_submit(bs, screen);
 
+   /* submit_count and submitted must change together and only after post_submit,
+    * otherwise a fence waiter could see this batch as already reset;
+    * the broadcast wakes fence waiters
+    */
+   mtx_lock(&bs->usage.mtx);
+   if (count_submit)
+      bs->usage.submit_count++;
    p_atomic_set(&bs->fence.submitted, true);
+   u_cnd_monotonic_broadcast(&bs->usage.flush);
+   mtx_unlock(&bs->usage.mtx);
+   p_atomic_inc(&ctx->submitted_batches);
 
    simple_mtx_lock(&screen->active_batch_states_lock);
    simple_mtx_lock(&screen->free_batch_states_lock);
@@ -875,6 +903,12 @@ zink_end_batch(struct zink_context *ctx)
    struct zink_batch_state *bs;
 
    bs = ctx->bs;
+   /* a batch keeps its cmdbufs and everything they use until it is submitted, so a context which
+    * flushes faster than the flush thread submits has to wait for it
+    */
+   if (ctx->queued_batches - p_atomic_read(&ctx->submitted_batches) >= ZINK_MAX_QUEUED_BATCHES &&
+       ctx->last_batch_state)
+      util_queue_fence_wait(&ctx->last_batch_state->flush_completed);
    zink_batch_state_append(&ctx->batch_states, &ctx->last_batch_state, bs);
    ctx->batch_states_count++;
    ctx->work_count = 0;
@@ -896,7 +930,23 @@ zink_end_batch(struct zink_context *ctx)
          zink_query_sync(ctx, (void*)entry->key);
    }
 
-   set_foreach(&bs->dmabuf_exports, entry) {
+   /* Wait for the implicit-sync fences of the dma-bufs this batch used: only
+    * for the write fences if the batch just read the image, but for all of
+    * them if the batch wrote it.
+    */
+   hash_table_foreach(&bs->dmabuf_exports, entry) {
+      struct zink_resource *res = (void*)entry->key;
+      if (!res->obj->exportable_dmabuf)
+         continue;
+      bool write = entry->data != NULL;
+      for (struct zink_resource *r = res; r; r = zink_resource(r->base.b.next)) {
+         VkSemaphore sem = zink_screen_export_dmabuf_semaphore(screen, r, write);
+         if (sem)
+            util_dynarray_append(&bs->fd_wait_semaphores, sem);
+      }
+   }
+
+   hash_table_foreach(&bs->dmabuf_exports, entry) {
       struct zink_resource *res = (void*)entry->key;
       if (screen->info.have_KHR_synchronization2) {
          VkImageMemoryBarrier2 imb;
@@ -953,11 +1003,14 @@ zink_end_batch(struct zink_context *ctx)
    util_dynarray_foreach(&bs->fences, struct zink_tc_fence*, mfence)
       (*mfence)->deferred_ctx = NULL;
 
+   ctx->queued_batches++;
    if (screen->threaded_submit) {
       util_queue_add_job(&screen->flush_queue, bs, &bs->flush_completed,
                          submit_queue, NULL, 0);
    } else {
+      simple_mtx_lock(&screen->submit_lock);
       submit_queue(bs, NULL, 0);
+      simple_mtx_unlock(&screen->submit_lock);
    }
 
    ctx->last_transfer_sync = 0;
@@ -1209,10 +1262,16 @@ zink_batch_usage_unflushed_wait(struct zink_context *ctx, struct zink_batch_usag
       } else { //multi-context
          mtx_lock(&u->mtx);
          if (trywait) {
-            struct timespec ts = {0, 10000};
-            cnd_timedwait(&u->flush, &u->mtx, &ts);
-         } else
-            cnd_wait(&u->flush, &u->mtx);
+            struct timespec ts;
+            timespec_from_nsec(&ts, os_time_get_nano() + 10000);
+            while (u->unflushed) {
+               if (u_cnd_monotonic_timedwait(&u->flush, &u->mtx, &ts) != thrd_success)
+                  break;
+            }
+         } else {
+            while (u->unflushed)
+               u_cnd_monotonic_wait(&u->flush, &u->mtx);
+         }
          mtx_unlock(&u->mtx);
       }
    }

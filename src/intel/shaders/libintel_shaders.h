@@ -13,7 +13,7 @@
 
 #include "util/macros.h"
 
-#include "compiler/intel_shader_enums.h"
+#include "compiler/intel_shader.h"
 
 #else
 #include "libcl_vk.h"
@@ -22,7 +22,7 @@
 #include "genxml/genX_cl_pack.h"
 #include "genxml/genX_rt_cl_pack.h"
 
-#include "compiler/intel_shader_enums.h"
+#include "compiler/intel_shader.h"
 
 #define _3DPRIM_PATCHLIST(n) (0x20 + (n - 1))
 #endif

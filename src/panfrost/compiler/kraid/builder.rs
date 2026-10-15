@@ -111,6 +111,12 @@ pub trait SSABuilder: Builder + AllocSSA {
         def
     }
 
+    fn copy_i64(&mut self, src: Src) -> SSARef {
+        let def = self.alloc_ref(64);
+        self.copy_i64_to(def.clone().into(), src);
+        def
+    }
+
     fn copy_ssa(&mut self, src: SSAValue) -> SSAValue {
         let def = self.alloc_ssa(src.bits());
         self.copy_to(def.into(), DataType::i(src.bits()), src.into());
@@ -312,7 +318,7 @@ pub trait SSABuilder: Builder + AllocSSA {
         //
         //  sign_bit = XOR(sign_bit, axis_bit(lane_id)).
         let lane = self.model().fau().special(SpecialFAU::LaneId).unwrap();
-        let mut lane = Src::from(lane);
+        let mut lane = Src::from(lane).word(0);
         if bits == 16 {
             lane = lane.half(0);
         }
@@ -383,6 +389,7 @@ pub trait SSABuilder: Builder + AllocSSA {
         let frexp = self.alloc_ssa(32);
         self.push_op(OpFrexpE {
             dst: frexp.into(),
+            src_type: DataType::F32,
             src: arg.clone(),
             mode: FrexpMode::Log,
             neg_result: false,

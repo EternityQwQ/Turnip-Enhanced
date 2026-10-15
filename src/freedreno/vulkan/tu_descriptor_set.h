@@ -44,11 +44,6 @@ struct tu_descriptor_set_binding_layout
    /* The size in bytes of each Vulkan descriptor. */
    uint32_t size;
 
-   /* Number of image/sampler hardware descriptor pairs used by one
-    * combined image sampler.  All other descriptor types use one.
-    */
-   uint8_t plane_count;
-
    uint32_t offset;
 
    /* Byte offset in the array of dynamic descriptors (offsetted by
@@ -175,6 +170,11 @@ struct tu_descriptor_pool
 VK_DEFINE_NONDISP_HANDLE_CASTS(tu_descriptor_pool, base, VkDescriptorPool,
                                VK_OBJECT_TYPE_DESCRIPTOR_POOL)
 
+struct tu_descriptor_update_template_sampler {
+   VkSamplerCreateFlags flags;
+   uint32_t descriptor[A6XX_TEX_SAMP_DWORDS];
+};
+
 struct tu_descriptor_update_template_entry
 {
    VkDescriptorType descriptor_type;
@@ -192,7 +192,7 @@ struct tu_descriptor_update_template_entry
    uint32_t buffer_offset;
 
    /* Only valid for combined image samplers and samplers */
-   const struct tu_sampler *immutable_samplers;
+   const struct tu_descriptor_update_template_sampler *immutable_samplers;
 
    /* In bytes */
    size_t src_offset;

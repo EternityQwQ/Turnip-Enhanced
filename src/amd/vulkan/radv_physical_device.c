@@ -59,8 +59,7 @@ radv_perf_query_supported(const struct radv_physical_device *pdev)
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    /* SQTT / SPM interfere with the register states for perf counters. */
-   return (pdev->info.gfx_level == GFX10_3 ||
-           (pdev->info.gfx_level >= GFX11 && pdev->info.gfx_level < GFX12)) &&
+   return pdev->info.gfx_level >= GFX10_3 && pdev->info.gfx_level <= GFX12 &&
           !(instance->vk.trace_mode & RADV_TRACE_MODE_RGP);
 }
 
@@ -72,7 +71,8 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
    if (RADV_DEBUG(instance, NO_MESH_SHADER))
       return false;
 
-   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev);
+   return pdev->use_ngg && !pdev->use_llvm && pdev->info.gfx_level >= GFX10_3 && radv_compute_queue_enabled(pdev) &&
+          !pdev->info.has_taskmesh_indirect0_bug;
 }
 
 bool
@@ -122,7 +122,7 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
    if (!radv_compute_queue_enabled(pdev))
       return false;
 
-   return pdev->info.gfx_level >= GFX9 && !(instance->queue_disable_flags & RADV_QUEUE_DISABLE_TRANSFER);
+   return pdev->info.gfx_level >= GFX7 && !(instance->queue_disable_flags & RADV_QUEUE_DISABLE_TRANSFER);
 }
 
 static bool
@@ -875,7 +875,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
 #ifdef RADV_USE_WSI_PLATFORM
       .EXT_image_compression_control_swapchain = radv_compression_control_enabled(pdev),
 #endif
-      .EXT_image_drm_format_modifier = pdev->info.gfx_level >= GFX9,
+      .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
       .EXT_image_sliced_view_of_3d = pdev->info.gfx_level >= GFX10,
       .EXT_image_view_min_lod = true,
@@ -944,6 +944,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_ycbcr_2plane_444_formats = true,
       .EXT_ycbcr_image_arrays = true,
       .EXT_zero_initialize_device_memory = true,
+      .AMD_anti_lag = true,
       .AMD_buffer_marker = true,
       .AMD_device_coherent_memory = radv_device_coherent_memory_enabled(pdev),
       .AMD_draw_indirect_count = true,
@@ -1684,6 +1685,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_extended_flags */
       .extendedFlags = true,
+
+      /* VK_AMD_anti_lag */
+      .antiLag = true,
    };
 }
 
@@ -2541,14 +2545,41 @@ radv_physical_device_destroy(struct vk_physical_device *vk_device)
    vk_free(&instance->vk.alloc, pdev);
 }
 
+// clang-format off
+static const uint32_t driconf_device_versions[] = {
+   [GFX6] = 60,
+   [GFX7] = 70,
+   [GFX8] = 80,
+   [GFX9] = 90,
+   [GFX10] = 100,
+   [GFX10_3] = 103,
+   [GFX11] = 110,
+   [GFX11_5] = 115,
+   [GFX11_7] = 117,
+   [GFX12] = 120,
+   [GFX12_1] = 121,
+};
+// clang-format on
+
+static uint32_t
+radv_get_driconf_device_version(const struct radv_physical_device *pdev)
+{
+   assert(pdev->info.gfx_level < ARRAY_SIZE(driconf_device_versions));
+   uint32_t device_version = driconf_device_versions[pdev->info.gfx_level];
+   assert(device_version != 0 && "Unknown gfx_level for the driconf device version");
+   return device_version;
+}
+
 static void
 radv_init_dri_options(struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
+   const uint32_t device_version = radv_get_driconf_device_version(pdev);
    struct radv_drirc *drirc = &pdev->drirc;
 
    radv_parse_dri_options(drirc, &(driConfigFileParseParams){
                                     .driverName = "radv",
+                                    .deviceVersion = device_version,
                                     .applicationName = instance->vk.app_info.app_name,
                                     .applicationVersion = instance->vk.app_info.app_version,
                                     .engineName = instance->vk.app_info.engine_name,
@@ -2560,13 +2591,6 @@ radv_init_dri_options(struct radv_physical_device *pdev)
       const bool is_d3d9 = instance->vk.app_info.app_version & 0x1;
 
       drirc->debug.disable_trunc_coord &= !is_d3d9;
-   }
-
-   if (pdev->info.gfx_level >= GFX12) {
-      /* GFX12 isn't affected by any DCC issues from drirc. */
-      pdev->drirc.debug.disable_dcc = false;
-      pdev->drirc.debug.disable_dcc_stores = false;
-      pdev->drirc.debug.disable_dcc_mips = false;
    }
 }
 
@@ -2710,6 +2734,17 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       goto fail;
    }
 
+   /* Vulkan requires either gfx or compute queues to be available.
+    * Fail initialization if neither are present (e.g., decode-only configurations).
+    */
+   if (!pdev->info.ip[AMD_IP_GFX].num_queues && !pdev->info.ip[AMD_IP_COMPUTE].num_queues) {
+      if (RADV_DEBUG(instance, STARTUP))
+         fprintf(stderr, "radv: info: device '%s' has no gfx or compute queues available.\n",
+                 ac_get_family_name(pdev->info.family));
+      result = VK_ERROR_INCOMPATIBLE_DRIVER;
+      goto fail;
+   }
+
    pdev->addrlib = ac_addrlib_create(&pdev->info, &pdev->info.max_alignment);
    if (!pdev->addrlib) {
       result = VK_ERROR_INITIALIZATION_FAILED;
@@ -2771,9 +2806,11 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
             pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_PARTIAL;
          } else if (!strcmp(gfx12_hiz_wa_str, "full")) {
             pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_FULL;
+         } else if (!strcmp(gfx12_hiz_wa_str, "full_rez")) {
+            pdev->gfx12_hiz_wa = RADV_GFX12_HIZ_WA_FULL_REZ;
          } else {
             fprintf(stderr, "radv: Invalid value found for radv_gfx12_hiz_wa. "
-                            "Accepted values are: disabled, partial or full.\n");
+                            "Accepted values are: disabled, partial, full or full_rez.\n");
          }
       }
    }

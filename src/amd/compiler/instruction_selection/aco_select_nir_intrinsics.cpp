@@ -399,6 +399,9 @@ emit_load(isel_context* ctx, Builder& bld, const LoadEmitInfo& info,
          bld.insert(std::move(vec));
       }
 
+      if (component_size % 4 && info.dst.type() == RegType::vgpr)
+         reg_type = RegType::vgpr;
+
       if (tmp[0].bytes() % component_size) {
          /* trim tmp[0] */
          assert(i == num_vals);

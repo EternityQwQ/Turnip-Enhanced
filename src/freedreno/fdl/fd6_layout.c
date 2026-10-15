@@ -152,13 +152,8 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
    layout->linear_fallback_threshold_texels =
       fdl_linear_fallback_threshold_texels(layout, info);
 
-   if (params->force_ubwc) {
-      /* An explicit compressed modifier describes UBWC storage for every
-       * level.  Falling back to a linear level would describe a different
-       * memory layout than the producer allocated.
-       */
-      layout->tile_all = true;
-   } else if (layout->width0 < layout->linear_fallback_threshold_texels) {
+   if (!params->force_ubwc &&
+       layout->width0 < layout->linear_fallback_threshold_texels) {
       layout->ubwc = false;
       /* Linear D/S is not supported by HW. */
       if (!util_format_is_depth_or_stencil(params->format))
@@ -223,25 +218,7 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
    if (explicit_layout) {
       offset = explicit_layout->offset;
       layout->pitch0 = explicit_layout->pitch;
-      layout->has_explicit_pitch = true;
-
-      if (explicit_layout->skip_last_level_padding &&
-          (layout->tile_mode != TILE6_LINEAR || layout->ubwc ||
-           params->mip_levels != 1 || params->array_size != 1 ||
-           params->depth0 != 1 || params->is_3d))
-         return false;
-
-      uint32_t pitch_alignment = 1u << layout->pitchalign;
-      if (explicit_layout->pitch_alignment) {
-         if (layout->tile_mode != TILE6_LINEAR || params->mip_levels != 1 ||
-             !util_is_power_of_two_nonzero(explicit_layout->pitch_alignment) ||
-             explicit_layout->pitch_alignment < layout->cpp)
-            return false;
-
-         pitch_alignment = explicit_layout->pitch_alignment;
-      }
-
-      if (align(layout->pitch0, pitch_alignment) != layout->pitch0)
+      if (align(layout->pitch0, 1 << layout->pitchalign) != layout->pitch0)
          return false;
    }
 
@@ -307,8 +284,7 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
        * The pitch is already sufficiently aligned, but height
        * may not be. note this only matters if last level is linear
        */
-      if (level == params->mip_levels - 1 &&
-          !(explicit_layout && explicit_layout->skip_last_level_padding))
+      if (level == params->mip_levels - 1)
          nblocksy = align(nblocksy, 4);
 
       slice->offset = offset + layout->size;

@@ -302,6 +302,7 @@ gather_intrinsic_info(const nir_shader *nir, const nir_intrinsic_instr *instr, s
    case nir_intrinsic_vulkan_resource_index:
       info->desc_set_used_mask |= (1u << nir_intrinsic_desc_set(instr));
       break;
+   case nir_intrinsic_image_deref_descriptor_amd:
    case nir_intrinsic_image_deref_load:
    case nir_intrinsic_image_deref_sparse_load:
    case nir_intrinsic_image_deref_store:
@@ -884,7 +885,7 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
       (gfx_state->ps.stencil_output_needs_epilog && info->ps.writes_stencil) ||
       (gfx_state->ps.sample_mask_output_needs_epilog && info->ps.writes_sample_mask) ||
       (writes_mrt0_alpha && ((gfx_level >= GFX11 && gfx_state->ms.alpha_to_coverage_unknown &&
-                              (info->ps.writes_z || info->ps.writes_stencil || info->ps.writes_sample_mask)) ||
+                              radv_ps_writes_mrtz(info)) ||
                              (gfx_state->ms.alpha_to_coverage_unknown && gfx_state->ms.alpha_to_one_enable)));
 
    if (!info->ps.has_epilog) {
@@ -899,23 +900,24 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
 
       info->ps.writes_mrt0_alpha_to_mrtz =
          writes_mrt0_alpha && gfx_state->ms.alpha_to_coverage_enable &&
-         ((gfx_level >= GFX11 && (info->ps.writes_z || info->ps.writes_stencil || info->ps.writes_sample_mask)) ||
+         ((gfx_level >= GFX11 && radv_ps_writes_mrtz(info)) ||
           gfx_state->ms.alpha_to_one_enable);
    }
 
    if (gfx_level >= GFX10_3) {
       /* Disable VRS in these cases:
        *
-       * - if the fragment shader reads gl_SampleMaskIn because we expose fragmentShadingRateWithShaderSampleMask =
-       *   VK_FALSE because the SAMPLE_COVERAGE PS VGPR only contains a 16-bit sample coverage mask, which isn't
-       *   enough for 8xMSAA and 2x2 coarse shading (we no longer support 8xMSAA, so we could allow gl_SampleMaskIn
-       *   with VRS now).
+       * - if the fragment shader reads gl_SampleMaskIn or writes gl_SampleMask because we expose
+       *   fragmentShadingRateWithShaderSampleMask = VK_FALSE because the SAMPLE_COVERAGE PS VGPR only contains a
+       *   16-bit sample coverage mask, which isn't enough for 8xMSAA and 2x2 coarse shading (we no longer support
+       *   8xMSAA, so we could allow gl_SampleMaskIn with VRS now).
        * - on GFX10.3, if the fragment shader requests a fragment interlock execution mode even if the ordered
        *   section was optimized out, to consistently implement fragmentShadingRateWithFragmentShaderInterlock =
        *   VK_FALSE.
        */
       info->ps.force_disable_vrs =
          gfx_state->ms.sample_shading_enable || info->ps.uses_sample_shading || nir->info.fs.sample_mask_in_declared ||
+         nir->info.fs.sample_mask_out_declared ||
          (gfx_level == GFX10_3 && (nir->info.fs.sample_interlock_ordered || nir->info.fs.sample_interlock_unordered ||
                                    nir->info.fs.pixel_interlock_ordered || nir->info.fs.pixel_interlock_unordered));
 

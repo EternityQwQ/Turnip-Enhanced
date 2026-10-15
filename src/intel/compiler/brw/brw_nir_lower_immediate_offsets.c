@@ -8,6 +8,7 @@
 #include "brw_nir.h"
 
 struct state {
+   const struct intel_device_info *devinfo;
    bool efficient_64bit;
 };
 
@@ -91,7 +92,11 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    if (nir_intrinsic_base(intrin) == 0)
       return false;
 
-   max_bits = MIN2(brw_max_immediate_offset_bits(binding_type, state->efficient_64bit), max_bits);
+   max_bits = MIN2(
+      brw_max_immediate_offset_bits(state->devinfo, binding_type,
+                                    state->efficient_64bit,
+                                    nir_is_shared_access(intrin)),
+      max_bits);
 
    b->cursor = nir_before_instr(&intrin->instr);
 
@@ -110,11 +115,6 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    const int32_t max = u_intN_max(max_bits);
 
    const int32_t base = nir_intrinsic_base(intrin);
-   if ((base % 4) == 0 && base >= min && base <= max)
-      return false;
-
-   int32_t addition = (base / (max + 1)) * (max + 1);
-   int32_t new_base = base - addition;
 
    /* Xe3P+ : BSpec 71885/72045: Global Offset
     *    "Specified the signed global offset (in number of data size
@@ -127,7 +127,14 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
     */
    const unsigned alignment =
       !state->efficient_64bit ? 4 :
-      MAX2(4, brw_nir_intrinsic_data_element_size(intrin));
+      brw_nir_intrinsic_data_element_size(intrin);
+
+   if ((base % alignment) == 0 && base >= min && base <= max)
+      return false;
+
+   int32_t addition = (base / (max + 1)) * (max + 1);
+   int32_t new_base = base - addition;
+
    int32_t unaligned = new_base % alignment;
    addition += unaligned;
    new_base -= unaligned;
@@ -143,9 +150,12 @@ lower_immediate_offsets(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 }
 
 bool
-brw_nir_lower_immediate_offsets(nir_shader *shader, bool efficient_64bit)
+brw_nir_lower_immediate_offsets(nir_shader *shader,
+                                const struct intel_device_info *devinfo,
+                                bool efficient_64bit)
 {
    struct state state = {
+      .devinfo = devinfo,
       .efficient_64bit = efficient_64bit,
    };
    return nir_shader_intrinsics_pass(shader, lower_immediate_offsets,

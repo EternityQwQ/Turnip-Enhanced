@@ -11,11 +11,10 @@ use crate::phi::PhiMap;
 use crate::ssa_value::*;
 use compiler::bitset::*;
 use compiler::cfg::CFG;
-use compiler::smallvec::*;
 use compiler::union_find::UnionFind;
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::collections::VecDeque;
-use std::ops::Range;
+use std::ops::{BitOrAssign, Range};
 
 /// A structure that models an arena from which to allocate SSA values.  An
 /// arena may be backed by registers or memory.  This struct mostly isn't
@@ -86,6 +85,21 @@ impl Arena {
         }
     }
 
+    /// Creates a new register arena for blend shaders
+    pub fn new_blend(model: &dyn Model) -> Arena {
+        let limit = 16 * 4;
+        Arena {
+            limit: limit.into(),
+            used: 0.into(),
+            granularity: limit,
+            is_mem: false,
+            round_robin: true,
+            tls_offset: 0,
+            is_v9_32reg: model.arch() < 15,
+            is_v9_64reg: false,
+        }
+    }
+
     /// Returns the number of bytes used from this arena.  This will be updated
     /// as we allocate and can be queried after RA is complete to know the
     /// final amount we need to report to the driver.
@@ -120,6 +134,11 @@ impl Arena {
             debug_assert_eq!(self.contains_ssa(&vec[i]), contains);
         }
         contains
+    }
+
+    /// Returns true if the given RegRef is entirely out-of-bounds
+    pub fn is_reg_oob(&self, reg: &RegRef) -> bool {
+        self.reg_to_bytes(reg).end >= self.limit()
     }
 
     /// Returns true if this arena is for registers.  This controls whether
@@ -215,35 +234,6 @@ impl Arena {
     }
 }
 
-struct SSABytesIter<'a> {
-    ssa_iter: std::slice::Iter<'a, SSAValue>,
-    bytes: Range<u16>,
-}
-
-impl<'a> Iterator for SSABytesIter<'a> {
-    type Item = (&'a SSAValue, Range<u16>);
-
-    fn next(&mut self) -> Option<(&'a SSAValue, Range<u16>)> {
-        if let Some(ssa) = self.ssa_iter.next() {
-            let ssa_bytes = u16::from(ssa.bytes());
-            let bytes = self.bytes.start..(self.bytes.start + ssa_bytes);
-            debug_assert!(bytes.end <= self.bytes.end);
-            self.bytes.start = bytes.end;
-            Some((ssa, bytes))
-        } else {
-            debug_assert!(self.bytes.is_empty());
-            None
-        }
-    }
-}
-
-fn iter_ssa_bytes(vec: &SSARef, bytes: Range<u16>) -> SSABytesIter<'_> {
-    SSABytesIter {
-        ssa_iter: vec.iter(),
-        bytes,
-    }
-}
-
 fn swizzle_byte_range(bytes: Range<u16>, swizzle: Swizzle) -> Range<u16> {
     let swz_bytes = match swizzle {
         Swizzle::B0000 => 0..1,
@@ -310,6 +300,17 @@ fn aligned_u16_range(start: u16, len: u16) -> Range<u16> {
     debug_assert!(len.is_power_of_two());
     let start = start & !(len - 1);
     start..(start + len)
+}
+
+pub fn instr_clobbered_regs(model: &dyn Model, op: &Op) -> Vec<RegRef> {
+    match op {
+        Op::BlendCall(_) => {
+            let link = model.preload_reg(PreloadReg::BlendReturnAddr).unwrap();
+            let lower16 = RegRef::new(0, RegRange::Regs(16));
+            vec![lower16, link]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// A register alignment constraint, specified as an 8-bit bitfield of possible
@@ -552,6 +553,14 @@ impl SSAAffinity {
     fn align_cost(&self, b: u16) -> u8 {
         self.align_cost[usize::from(b % 8)]
     }
+
+    fn reg_byte(&self) -> Option<u16> {
+        if self.reg_byte == u16::MAX {
+            None
+        } else {
+            Some(self.reg_byte)
+        }
+    }
 }
 
 struct SSAVecComp {
@@ -642,7 +651,7 @@ impl SSAVecRepr {
 
 struct AffinityMapBuilder<'a> {
     model: &'a dyn Model,
-    reg_arena: &'a Arena,
+    arena: &'a Arena,
     phi_map: &'a PhiMap,
     ssa_affinities: SSAValueIndexedVec<SSAAffinity>,
     phi_webs: UnionFind<SSAValue, FxBuildHasher>,
@@ -650,7 +659,7 @@ struct AffinityMapBuilder<'a> {
 }
 
 impl AffinityMapBuilder<'_> {
-    fn add_instr(&mut self, bl: &impl BlockLiveness, instr: &Instr) {
+    fn add_instr(&mut self, bl: &BlockLiveness, instr: &Instr) {
         let def_order = &mut self.def_order;
         match &instr.op {
             Op::MkVecV2I16(op) => {
@@ -709,14 +718,13 @@ impl AffinityMapBuilder<'_> {
             }
             Op::RegOut(op) => {
                 if let SrcRef::SSA(vec) = &op.src.src_ref {
-                    debug_assert_eq!(op.reg.bytes(), vec.bytes());
-                    let mut bytes = self.reg_arena.reg_to_bytes(&op.reg);
-                    for ssa in vec {
-                        debug_assert_eq!(ssa.bytes(), 4);
-                        self.ssa_affinities[ssa].reg_byte = bytes.start;
-                        bytes.start += 4;
+                    if self.arena.contains_ref(vec) {
+                        debug_assert_eq!(op.reg.bytes(), vec.bytes());
+                        let bytes = self.arena.reg_to_bytes(&op.reg);
+                        for (ssa, bytes) in vec.iter_zip_bytes(bytes) {
+                            self.ssa_affinities[ssa].reg_byte = bytes.start;
+                        }
                     }
-                    debug_assert_eq!(bytes.end, bytes.start);
                 }
             }
             _ => {
@@ -724,6 +732,17 @@ impl AffinityMapBuilder<'_> {
                     let SrcRef::SSA(vec) = &src.src_ref else {
                         continue;
                     };
+
+                    if self.arena.contains_ref(vec) {
+                        if let Some(reg) =
+                            self.model.op_fixed_src_reg(&instr.op, src)
+                        {
+                            let bytes = self.arena.reg_to_bytes(&reg);
+                            for (ssa, bytes) in vec.iter_zip_bytes(bytes) {
+                                self.ssa_affinities[ssa].reg_byte = bytes.start;
+                            }
+                        }
+                    }
 
                     if vec.comps() > 1 {
                         let repr = SSAVecRepr::for_ssa_ref(vec, def_order);
@@ -756,14 +775,14 @@ struct AffinityMap {
 impl AffinityMap {
     fn for_shader(
         s: &Shader,
-        reg_arena: &Arena,
-        live: &impl Liveness,
+        arena: &Arena,
+        live: &Liveness,
         phi_map: &PhiMap,
     ) -> AffinityMap {
         let ssa_count = s.ssa_alloc.count();
         let mut b = AffinityMapBuilder {
             model: s.model,
-            reg_arena,
+            arena,
             phi_map,
             ssa_affinities: SSAValueIndexedVec::with_count(ssa_count),
             phi_webs: UnionFind::new(),
@@ -814,6 +833,19 @@ impl AffinityMap {
         }
         cost
     }
+
+    fn reg_bytes(&self, vec: &SSARef) -> Option<Range<u16>> {
+        let start = self.ssa_affinities[vec[0]].reg_byte()?;
+        let mut end = start + u16::from(vec[0].bytes());
+        for i in 1..vec.len() {
+            let b = self.ssa_affinities[vec[i]].reg_byte()?;
+            if b != end {
+                return None;
+            }
+            end = b + u16::from(vec[i].bytes());
+        }
+        Some(start..end)
+    }
 }
 
 struct WrapOnceCounter {
@@ -857,6 +889,40 @@ impl WrapOnceCounter {
     }
 }
 
+#[derive(Default)]
+struct PinnedByteSet(BitSet<usize>);
+
+impl PinnedByteSet {
+    fn bytes_are_unpinned(&self, bytes: Range<u16>) -> bool {
+        let bytes = bytes.start.into()..bytes.end.into();
+        self.0.all_unset_in_range(bytes)
+    }
+
+    fn clear(&mut self) {
+        self.0.clear()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn pin_bytes(&mut self, bytes: Range<u16>) {
+        debug_assert!(self.bytes_are_unpinned(bytes.clone()));
+        self.pin_bytes_no_check(bytes);
+    }
+
+    fn pin_bytes_no_check(&mut self, bytes: Range<u16>) {
+        let bytes = bytes.start.into()..bytes.end.into();
+        self.0.set_range(bytes);
+    }
+}
+
+impl BitOrAssign<&PinnedByteSet> for PinnedByteSet {
+    fn bitor_assign(&mut self, other: &PinnedByteSet) {
+        self.0 |= other.0.s(..);
+    }
+}
+
 struct LocalRegAlloc<'a> {
     model: &'a dyn Model,
 
@@ -883,8 +949,14 @@ struct LocalRegAlloc<'a> {
     /// When searching for a free byte range, the byte to start at.
     search_start: std::cell::Cell<u16>,
 
-    /// Bitset of bytes currently pinned.
-    pinned: BitSet<usize>,
+    /// PinnedByteSet for bytes that are live-in to the current instruction
+    pinned_in: PinnedByteSet,
+
+    /// PinnedByteSet for bytes that are live-out of the current instruction
+    pinned_out: PinnedByteSet,
+
+    /// PinnedByteSet for bytes that are live-in or live-out
+    pinned_in_out: PinnedByteSet,
 }
 
 impl LocalRegAlloc<'_> {
@@ -904,8 +976,19 @@ impl LocalRegAlloc<'_> {
             idx_bytes: Default::default(),
             byte_idx,
             search_start: 0.into(),
-            pinned: Default::default(),
+            pinned_in: Default::default(),
+            pinned_out: Default::default(),
+            pinned_in_out: Default::default(),
         }
+    }
+
+    /// Updates idx_bytes without actually assigning it
+    fn set_idx_bytes(&mut self, idx: u32, bytes: Range<u16>) {
+        let idx = usize::try_from(idx).unwrap();
+        if self.idx_bytes.len() <= idx {
+            self.idx_bytes.resize_with(idx + 1, || 0..0);
+        }
+        self.idx_bytes[idx] = bytes;
     }
 
     fn assign_idx_bytes(&mut self, idx: u32, bytes: Range<u16>) {
@@ -922,11 +1005,7 @@ impl LocalRegAlloc<'_> {
             self.byte_idx[usize::from(b)] = idx;
         }
 
-        let idx = usize::try_from(idx).unwrap();
-        if self.idx_bytes.len() <= idx {
-            self.idx_bytes.resize_with(idx + 1, || 0..0);
-        }
-        self.idx_bytes[idx] = bytes.clone();
+        self.set_idx_bytes(idx, bytes);
     }
 
     fn free_bytes(&mut self, bytes: Range<u16>) {
@@ -934,6 +1013,19 @@ impl LocalRegAlloc<'_> {
         debug_assert!(self.used.all_set_in_range(bytes_usize.clone()));
 
         self.used.unset_range(bytes_usize);
+    }
+
+    /// Updates idx_bytes without actually assigning it
+    fn set_ssa_bytes(&mut self, ssa: &SSAValue, bytes: Range<u16>) {
+        assert!(
+            bytes.len() == usize::from(ssa.bytes()),
+            "The size of the byte range must match the SSA value",
+        );
+        assert!(
+            bytes.start % u16::from(ssa.bytes()) == 0,
+            "SSA values must always be aligned to their size",
+        );
+        self.set_idx_bytes(ssa.idx(), bytes);
     }
 
     fn assign_ssa_bytes(&mut self, ssa: &SSAValue, bytes: Range<u16>) {
@@ -994,7 +1086,8 @@ impl LocalRegAlloc<'_> {
     }
 
     fn assign_ssa_ref_bytes(&mut self, vec: &SSARef, bytes: Range<u16>) {
-        for (ssa, bytes) in iter_ssa_bytes(vec, bytes) {
+        debug_assert_eq!(bytes.len(), usize::from(vec.bytes()));
+        for (ssa, bytes) in vec.iter_zip_bytes(bytes) {
             self.assign_ssa_bytes(ssa, bytes);
         }
     }
@@ -1026,30 +1119,9 @@ impl LocalRegAlloc<'_> {
         self.used.all_unset_in_range(bytes)
     }
 
-    fn pin_bytes(&mut self, bytes: Range<u16>) {
-        debug_assert!(self.bytes_are_unpinned(bytes.clone()));
-        let bytes = bytes.start.into()..bytes.end.into();
-        self.pinned.set_range(bytes);
-    }
-
-    fn unpin_bytes(&mut self, bytes: Range<u16>) {
-        debug_assert!(self.bytes_are_pinned(bytes.clone()));
-        let bytes = bytes.start.into()..bytes.end.into();
-        self.pinned.unset_range(bytes);
-    }
-
-    fn bytes_are_pinned(&self, bytes: Range<u16>) -> bool {
-        let bytes = bytes.start.into()..bytes.end.into();
-        self.pinned.all_set_in_range(bytes)
-    }
-
-    fn bytes_are_unpinned(&self, bytes: Range<u16>) -> bool {
-        let bytes = bytes.start.into()..bytes.end.into();
-        self.pinned.all_unset_in_range(bytes)
-    }
-
     fn find_aligned_unused_unpinned_range(
         &self,
+        pinned: &PinnedByteSet,
         start: usize,
         count: usize,
         align_mul: usize,
@@ -1062,7 +1134,7 @@ impl LocalRegAlloc<'_> {
             align_offset,
         );
         loop {
-            let unpinned = self.pinned.find_aligned_unset_range(
+            let unpinned = pinned.0.find_aligned_unset_range(
                 unused,
                 count,
                 align_mul,
@@ -1087,16 +1159,18 @@ impl LocalRegAlloc<'_> {
 
     fn is_aligned_unpinned_range(
         &self,
+        pinned: &PinnedByteSet,
         bytes: Range<u16>,
         align: RegAlignConstraint,
     ) -> bool {
         align.satisfied(bytes.start.into())
             && self.arena.is_contiguous(bytes.clone())
-            && self.bytes_are_unpinned(bytes)
+            && pinned.bytes_are_unpinned(bytes)
     }
 
     fn find_unpinned_bytes(
         &self,
+        pinned: &PinnedByteSet,
         bytes: u8,
         align: RegAlignConstraint,
         cost_fn: impl Fn(u16) -> u8,
@@ -1112,6 +1186,7 @@ impl LocalRegAlloc<'_> {
         );
         while let Some(start) = cur.get() {
             let b = self.find_aligned_unused_unpinned_range(
+                pinned,
                 start,
                 usize::from(bytes),
                 usize::from(align_mul),
@@ -1147,7 +1222,7 @@ impl LocalRegAlloc<'_> {
             usize::from(self.arena.limit()),
         );
         while let Some(start) = cur.get() {
-            let b = self.pinned.find_aligned_unset_range(
+            let b = pinned.0.find_aligned_unset_range(
                 start,
                 usize::from(bytes),
                 usize::from(align_mul),
@@ -1183,12 +1258,13 @@ impl LocalRegAlloc<'_> {
 
     fn choose_bytes(
         &self,
+        p: &PinnedByteSet,
         bytes: u8,
         align: RegAlignConstraint,
         cost_fn: impl Fn(u16) -> u8,
     ) -> Range<u16> {
         let b = self
-            .find_unpinned_bytes(bytes, align, cost_fn)
+            .find_unpinned_bytes(p, bytes, align, cost_fn)
             .expect("Out of registers!");
         if self.arena.round_robin {
             self.search_start.set(b + u16::from(bytes));
@@ -1196,17 +1272,28 @@ impl LocalRegAlloc<'_> {
         b..(b + u16::from(bytes))
     }
 
-    fn choose_aligned_bytes(&self, bytes: u8) -> Range<u16> {
+    fn choose_aligned_bytes(&self, p: &PinnedByteSet, bytes: u8) -> Range<u16> {
         let align = RegAlignConstraint::for_align(bytes, 0);
-        self.choose_bytes(bytes, align, |_| 0)
+        self.choose_bytes(p, bytes, align, |_| 0)
     }
 
     fn choose_ssa_ref_bytes(
         &self,
+        p: &PinnedByteSet,
         vec: &SSARef,
         align: RegAlignConstraint,
         cost_fn: impl Fn(u16) -> u8,
     ) -> Range<u16> {
+        // First check to see if we have a specific reg affinity and if those
+        // bytes happen to be free.
+        if let Some(bytes) = self.affinities.reg_bytes(vec) {
+            if self.is_aligned_unpinned_range(p, bytes.clone(), align)
+                && self.bytes_are_unused(bytes.clone())
+            {
+                return bytes;
+            }
+        }
+
         if vec.comps() == 1 {
             let ssa = vec[0];
             let a = &self.affinities.get_ssa(ssa);
@@ -1223,15 +1310,18 @@ impl LocalRegAlloc<'_> {
                     if let Some(bytes) =
                         self.ssa_bytes_offset(vec_repr, a.vec_offset.into())
                     {
-                        if self.is_aligned_unpinned_range(bytes.clone(), align)
-                            && self.bytes_are_unused(bytes.clone())
+                        if self.is_aligned_unpinned_range(
+                            p,
+                            bytes.clone(),
+                            align,
+                        ) && self.bytes_are_unused(bytes.clone())
                         {
                             return bytes;
                         }
                     }
 
                     // Fall back to the default allocation
-                    self.choose_bytes(ssa.bytes(), align, cost_fn)
+                    self.choose_bytes(p, ssa.bytes(), align, cost_fn)
                 } else {
                     // If we're the vector representative, we want to find
                     // enough space for the whole vector.
@@ -1253,7 +1343,7 @@ impl LocalRegAlloc<'_> {
                             .unwrap_or(u8::MAX)
                     };
 
-                    let bytes = self.choose_bytes(ssa.bytes(), align, |b| {
+                    let bytes = self.choose_bytes(p, ssa.bytes(), align, |b| {
                         cost_fn(b).saturating_add(vec_cost_fn(b))
                     });
 
@@ -1268,39 +1358,74 @@ impl LocalRegAlloc<'_> {
                 }
             } else {
                 // No vector use
-                self.choose_bytes(ssa.bytes(), align, cost_fn)
+                self.choose_bytes(p, ssa.bytes(), align, cost_fn)
             }
         } else {
             // For vectors, we assume the default is the best we can do. Either
             // the vector use is just going to use this vector (the likely case)
             // or it'll get split up.  The chances of two vectors being combined
             // into one where everything still aligns is pretty low.
-            self.choose_bytes(vec.bytes(), align, |b| {
+            self.choose_bytes(p, vec.bytes(), align, |b| {
                 cost_fn(b).saturating_add(self.affinities.align_cost(vec, b))
             })
         }
     }
 
+    fn choose_fixed_bytes(
+        &self,
+        reg: RegRef,
+        bytes: u8,
+        align: RegAlignConstraint,
+    ) -> Range<u16> {
+        assert!(reg.bytes() >= bytes);
+        let b = self.arena.reg_to_bytes(&reg).start;
+        assert!(align.satisfied(b.into()));
+        b..(b + u16::from(bytes))
+    }
+
     fn choose_src_bytes(
         &self,
         vec: &SSARef,
+        is_killed: bool,
         align: RegAlignConstraint,
         src_bytes: &BitSet<usize>,
     ) -> Range<u16> {
+        let p = if is_killed {
+            &self.pinned_in
+        } else {
+            &self.pinned_in_out
+        };
+
         // Common case: Try to re-choose the old value
         if let Some(vec_bytes) = self.ssa_ref_bytes(vec) {
-            if self.is_aligned_unpinned_range(vec_bytes.clone(), align) {
+            if self.is_aligned_unpinned_range(p, vec_bytes.clone(), align) {
                 return vec_bytes;
             }
         }
 
         let bytes = vec.bytes();
-        self.choose_ssa_ref_bytes(vec, align, |b| {
+        self.choose_ssa_ref_bytes(p, vec, align, |b| {
             let bytes = b..(b + u16::from(bytes));
-            src_bytes
-                .count_set_in_range(bytes.start.into()..bytes.end.into())
-                .try_into()
-                .unwrap_or(u8::MAX)
+
+            let mut cost = 0;
+            for (ssa, bytes) in vec.iter_zip_bytes(bytes) {
+                // If this SSA is already in the right place, it's free
+                if self.ssa_bytes(ssa).start == bytes.start {
+                    continue;
+                }
+
+                // One to move this SSA into place
+                cost += 1;
+
+                // One more if we have to move something else out
+                if src_bytes
+                    .any_set_in_range(bytes.start.into()..bytes.end.into())
+                {
+                    cost += 1;
+                }
+            }
+
+            cost
         })
     }
 
@@ -1311,9 +1436,10 @@ impl LocalRegAlloc<'_> {
         align: RegAlignConstraint,
     ) -> Range<u16> {
         let ssa_bytes = vec.bytes();
+        let p = &self.pinned_out;
 
         if let Some(phi_bytes) = self.ssa_ref_phi_bytes(vec) {
-            if self.is_aligned_unpinned_range(phi_bytes.clone(), align)
+            if self.is_aligned_unpinned_range(p, phi_bytes.clone(), align)
                 && self.bytes_are_unused(phi_bytes.clone())
             {
                 debug_assert_eq!(phi_bytes.len(), usize::from(ssa_bytes));
@@ -1323,7 +1449,7 @@ impl LocalRegAlloc<'_> {
 
         if vec.comps() == 1 {
             debug_assert!(ssa_bytes <= bytes && bytes <= 4);
-            self.choose_ssa_ref_bytes(vec, align, |b| {
+            self.choose_ssa_ref_bytes(p, vec, align, |b| {
                 let bytes = aligned_u16_range(b, bytes.into());
                 debug_assert!(b + u16::from(ssa_bytes) <= bytes.end);
                 self.used
@@ -1333,7 +1459,7 @@ impl LocalRegAlloc<'_> {
             })
         } else {
             debug_assert_eq!(ssa_bytes, bytes);
-            self.choose_ssa_ref_bytes(vec, align, |_| 0)
+            self.choose_ssa_ref_bytes(p, vec, align, |_| 0)
         }
     }
 
@@ -1342,7 +1468,7 @@ impl LocalRegAlloc<'_> {
         ip: usize,
         instr: &mut Instr,
         pcopy: &mut ParallelCopy,
-        bl: &impl BlockLiveness,
+        bl: &BlockLiveness,
     ) {
         // We use a bitmask for indices
         assert!(instr.srcs().len() <= 8);
@@ -1350,9 +1476,15 @@ impl LocalRegAlloc<'_> {
 
         struct SrcDst {
             is_src: bool,
+            is_killed: bool,
             mask: u8,
             bytes: u8,
             align: RegAlignConstraint,
+            fixed_reg: Option<RegRef>,
+            /// Byte range assigned to the SSARef
+            ssa_bytes: Range<u16>,
+            /// Byte range allocated
+            ra_bytes: Range<u16>,
             vec: SSARef,
         }
 
@@ -1378,6 +1510,12 @@ impl LocalRegAlloc<'_> {
             let align =
                 RegAlignConstraint::for_op_src(self.model, &instr.op, src);
 
+            let fixed_reg = if self.arena.is_reg() {
+                self.model.op_fixed_src_reg(&instr.op, src)
+            } else {
+                None
+            };
+
             let mut first_seen = true;
             for src_dst in srcs_dsts.iter_mut() {
                 if &src_dst.vec == vec {
@@ -1386,6 +1524,10 @@ impl LocalRegAlloc<'_> {
                     src_dst.mask |= 1 << i;
                     debug_assert_eq!(src_dst.bytes, bytes);
                     src_dst.align &= align;
+                    if fixed_reg.is_some() {
+                        assert!(src_dst.fixed_reg.is_none());
+                        src_dst.fixed_reg = fixed_reg;
+                    }
                     break;
                 }
             }
@@ -1393,7 +1535,12 @@ impl LocalRegAlloc<'_> {
                 // This is the first time we've seen this SSA ref.  Evict it
                 // and add it to the list.  The evict handling at the end will
                 // ensure we copy it back into place.
+                let mut is_killed = true;
                 for ssa in vec {
+                    if bl.is_live_after_ip(ssa, ip) {
+                        is_killed = false;
+                    }
+
                     let ssa_bytes = self.ssa_bytes(ssa);
                     src_bytes.set_range(
                         ssa_bytes.start.into()..ssa_bytes.end.into(),
@@ -1408,9 +1555,13 @@ impl LocalRegAlloc<'_> {
 
                 srcs_dsts.push(SrcDst {
                     is_src: true,
+                    is_killed,
                     mask: 1 << i,
                     bytes,
                     align,
+                    fixed_reg,
+                    ssa_bytes: 0..0,
+                    ra_bytes: 0..0,
                     vec: vec.clone(),
                 });
             }
@@ -1428,23 +1579,68 @@ impl LocalRegAlloc<'_> {
             let (bytes, align) =
                 RegAlignConstraint::for_op_dst(self.model, &instr.op, dst);
 
+            let fixed_reg = if self.arena.is_reg() {
+                self.model.op_fixed_dst_reg(&instr.op, dst)
+            } else {
+                None
+            };
+
             srcs_dsts.push(SrcDst {
                 is_src: false,
+                is_killed: false,
                 mask: 1 << i,
                 bytes,
                 align,
+                fixed_reg,
+                ssa_bytes: 0..0,
+                ra_bytes: 0..0,
                 vec: vec.clone(),
             });
         }
 
+        // Evict everything in the clobber set.
+        if self.arena.is_reg() {
+            for reg in instr_clobbered_regs(self.model, &instr.op) {
+                let bytes = self.arena.reg_to_bytes(&reg);
+                for b in bytes.clone() {
+                    if let Some(idx) = self.byte_idx(b) {
+                        let idx_bytes = self.idx_bytes(idx);
+                        evicted.push_back(Evicted {
+                            is_src: false,
+                            bytes: idx_bytes.clone(),
+                            idx,
+                        });
+                        self.free_bytes(idx_bytes);
+                    }
+                }
+
+                // We don't allow clobbers with destinations.  Mark them in
+                // pinned_in_out to ensure that no sources we need preserved
+                // get assigned to clobbered regs.
+                debug_assert!(instr.dsts().is_empty());
+                self.pinned_in_out.pin_bytes_no_check(bytes);
+            }
+        }
+
         // Sort by size in descending order.  sort_by_key() is guaranteed to be
         // stable so this also ensures that sources get processed first.
-        srcs_dsts.sort_by_key(|a| std::cmp::Reverse(a.bytes));
+        // Constrained registers have higher priority (otherwise other sources
+        // would steal their place)
+        srcs_dsts.sort_by_key(|a| {
+            std::cmp::Reverse((a.fixed_reg.is_some(), a.bytes))
+        });
 
-        for src_dst in &srcs_dsts {
-            let ssa_bytes = if src_dst.is_src {
+        for src_dst in &mut srcs_dsts {
+            let ssa_bytes = if let Some(reg) = src_dst.fixed_reg {
+                self.choose_fixed_bytes(reg, src_dst.bytes, src_dst.align)
+            } else if src_dst.is_src {
                 debug_assert_eq!(src_dst.bytes, src_dst.vec.bytes());
-                self.choose_src_bytes(&src_dst.vec, src_dst.align, &src_bytes)
+                self.choose_src_bytes(
+                    &src_dst.vec,
+                    src_dst.is_killed,
+                    src_dst.align,
+                    &src_bytes,
+                )
             } else {
                 self.choose_dst_bytes(
                     &src_dst.vec,
@@ -1452,6 +1648,7 @@ impl LocalRegAlloc<'_> {
                     src_dst.align,
                 )
             };
+            debug_assert_eq!(ssa_bytes.len(), usize::from(src_dst.vec.bytes()));
 
             // Expand the byte range, if needed.  This can happen for ALU dsts
             // if we had to widen the ALU op.
@@ -1465,7 +1662,6 @@ impl LocalRegAlloc<'_> {
                 ssa_bytes.clone()
             };
 
-            // Evict anything that currently lives in the selected range.
             for b in bytes.clone() {
                 if let Some(idx) = self.byte_idx(b) {
                     let idx_bytes = self.idx_bytes(idx);
@@ -1479,16 +1675,38 @@ impl LocalRegAlloc<'_> {
             }
 
             // Pin the range
-            self.pin_bytes(bytes.clone());
+            if src_dst.is_src {
+                debug_assert_eq!(ssa_bytes, bytes);
+                self.pinned_in.pin_bytes(bytes.clone());
+                for (ssa, bytes) in src_dst.vec.iter_zip_bytes(bytes.clone()) {
+                    if bl.is_live_after_ip(ssa, ip) {
+                        self.pinned_out.pin_bytes(bytes.clone());
+                    }
+                }
+            } else {
+                self.pinned_out.pin_bytes(bytes.clone());
+            }
+            self.pinned_in_out.pin_bytes_no_check(bytes.clone());
 
-            for (ssa, bytes) in iter_ssa_bytes(&src_dst.vec, ssa_bytes.clone())
-            {
-                // Assign the SSA value to the byte range
-                self.assign_ssa_bytes(ssa, bytes.clone());
+            src_dst.ssa_bytes = ssa_bytes;
+            src_dst.ra_bytes = bytes;
+        }
 
-                // Check if it's killed
-                if !bl.is_live_after_ip(ssa, ip) {
-                    self.free_bytes(bytes);
+        for src_dst in &srcs_dsts {
+            let ssa_bytes = src_dst.ssa_bytes.clone();
+            let ra_bytes = src_dst.ra_bytes.clone();
+
+            // Assign bytes to SSA values but only if the value is live after
+            // this instruction.  Only actually assign if the value is still
+            // live after this instruction.
+            for (ssa, bytes) in src_dst.vec.iter_zip_bytes(ssa_bytes.clone()) {
+                if bl.is_live_after_ip(ssa, ip) {
+                    self.assign_ssa_bytes(ssa, bytes.clone());
+                } else {
+                    // If it's not live, update idx_bytes without assigning.
+                    // This way it represents the last place `ssa` ever lived.
+                    // We need this for the eviction code below.
+                    self.set_ssa_bytes(ssa, bytes.clone());
                 }
             }
 
@@ -1501,7 +1719,7 @@ impl LocalRegAlloc<'_> {
                     let i = usize::try_from(i).unwrap();
                     let src = &instr.srcs()[i];
 
-                    let ra_src = self.arena.src_for_bytes(bytes.clone());
+                    let ra_src = self.arena.src_for_bytes(ra_bytes.clone());
                     if let SrcRef::Reg(mut reg) = ra_src.src_ref {
                         let mut swz = ra_src.swizzle;
                         if self.model.op_src_is_64bit(&instr.op, src) {
@@ -1525,6 +1743,14 @@ impl LocalRegAlloc<'_> {
                         src.swizzle = swz
                             .swizzle(src.swizzle)
                             .expect("8 and 16-bit sources have to swizzle");
+
+                        // If all the SSA values read by this source are killed,
+                        // mark this as the last use.  Only do this if the SSA
+                        // values in question consume whole registers because
+                        // the hardware's last-use concept is per-register, not
+                        // per-byte.
+                        let whole_regs = src_dst.vec[0].bits() == 32;
+                        src.last_use = src_dst.is_killed && whole_regs;
                     } else {
                         assert_eq!(src.swizzle, ra_src.swizzle);
                         instr.srcs_mut()[i].src_ref = ra_src.src_ref;
@@ -1542,7 +1768,7 @@ impl LocalRegAlloc<'_> {
                 } else {
                     // For ALU ops, we need to widen the destination as needed
                     let dst = &mut instr.dsts_mut()[i];
-                    let ra_dst = self.arena.dst_for_bytes(bytes);
+                    let ra_dst = self.arena.dst_for_bytes(ra_bytes);
                     dst.dst_ref = ra_dst.dst_ref;
                     dst.lanes = fold_lanes(ra_dst.lanes, dst.lanes);
                 }
@@ -1557,7 +1783,8 @@ impl LocalRegAlloc<'_> {
                 idx_bytes
             } else {
                 let nr_bytes = e.bytes.len().try_into().unwrap();
-                let bytes = self.choose_aligned_bytes(nr_bytes);
+                let bytes =
+                    self.choose_aligned_bytes(&self.pinned_in_out, nr_bytes);
 
                 // Evict anything that might happen to be in dst_bytes
                 for b in bytes.clone() {
@@ -1573,7 +1800,7 @@ impl LocalRegAlloc<'_> {
                 }
 
                 // Pin dst_bytes so we don't try to re-use it
-                self.pin_bytes(bytes.clone());
+                self.pinned_in_out.pin_bytes(bytes.clone());
 
                 // Assign the evicted idx to the new location
                 self.assign_idx_bytes(e.idx, bytes.clone());
@@ -1588,13 +1815,15 @@ impl LocalRegAlloc<'_> {
         }
 
         // Clean up by unpinning everything
-        self.pinned.clear();
+        self.pinned_in.clear();
+        self.pinned_out.clear();
+        self.pinned_in_out.clear();
     }
 
     fn try_coalesce_mkvec(
         &mut self,
         ip: usize,
-        bl: &impl BlockLiveness,
+        bl: &BlockLiveness,
         instr: &Instr,
     ) -> bool {
         debug_assert!(instr.dsts().len() == 1);
@@ -1683,6 +1912,9 @@ struct GlobalRegAlloc<'a> {
     /// index of the SSA value.  For phis, the index is the index of the phi
     /// destination SSA value.
     live_out: Vec<Option<FxHashMap<u32, Range<u16>>>>,
+
+    /// Pinned byte set for cross-block allocation
+    pinned: PinnedByteSet,
 }
 
 impl GlobalRegAlloc<'_> {
@@ -1694,6 +1926,7 @@ impl GlobalRegAlloc<'_> {
         GlobalRegAlloc {
             local: LocalRegAlloc::new(model, arena, affinities),
             live_out: Default::default(),
+            pinned: Default::default(),
         }
     }
 
@@ -1752,7 +1985,7 @@ impl GlobalRegAlloc<'_> {
     fn start_block(
         &mut self,
         cfg: &CFG<BasicBlock>,
-        live: &impl Liveness,
+        live: &Liveness,
         ssa_alloc: &SSAValueAllocator,
         bi: usize,
     ) {
@@ -1804,14 +2037,15 @@ impl GlobalRegAlloc<'_> {
         prefer: Option<Range<u16>>,
         src_bytes: &BitSet<usize>,
     ) -> Range<u16> {
+        let p = &self.pinned;
         if let Some(prefer) = prefer {
-            if !self.local.bytes_are_pinned(prefer.clone()) {
+            if p.bytes_are_unpinned(prefer.clone()) {
                 return prefer;
             }
         }
 
         let align = RegAlignConstraint::for_align(bytes, 0);
-        let b = self.local.find_unpinned_bytes(bytes, align, |b| {
+        let b = self.local.find_unpinned_bytes(p, bytes, align, |b| {
             let bytes = b..(b + u16::from(bytes));
             let bytes = bytes.start.into()..bytes.end.into();
             debug_assert!(bytes.len() <= 8);
@@ -1825,7 +2059,7 @@ impl GlobalRegAlloc<'_> {
     fn end_block(
         &mut self,
         cfg: &CFG<BasicBlock>,
-        live: &impl Liveness,
+        live: &Liveness,
         ssa_alloc: &SSAValueAllocator,
         bi: usize,
         phi_srcs: &mut Vec<Box<OpPhiSrc>>,
@@ -1833,7 +2067,7 @@ impl GlobalRegAlloc<'_> {
         phi_map: &PhiMap,
         pcopy: &mut ParallelCopy,
     ) {
-        debug_assert!(self.local.pinned.is_empty());
+        debug_assert!(self.pinned.is_empty());
 
         let succ = cfg.succ_indices(bi);
         assert!(!succ.is_empty());
@@ -1985,7 +2219,7 @@ impl GlobalRegAlloc<'_> {
                     &all_src_bytes,
                 );
 
-                self.local.pin_bytes(dst_bytes.clone());
+                self.pinned.pin_bytes(dst_bytes.clone());
                 pcopy.add_copy(
                     self.local.arena.dst_for_bytes(dst_bytes.clone()),
                     self.local.arena.src_for_bytes(idx_bytes.clone()),
@@ -2031,7 +2265,7 @@ impl GlobalRegAlloc<'_> {
                     &all_src_bytes,
                 );
 
-                self.local.pin_bytes(dst_bytes.clone());
+                self.pinned.pin_bytes(dst_bytes.clone());
                 pcopy.add_copy(
                     self.local.arena.dst_for_bytes(dst_bytes.clone()),
                     self.local.arena.src_for_bytes(idx_bytes.clone()),
@@ -2061,10 +2295,10 @@ impl GlobalRegAlloc<'_> {
                     &all_src_bytes,
                 );
 
-                self.local.pin_bytes(dst_bytes.clone());
+                self.pinned.pin_bytes(dst_bytes.clone());
 
                 for (i, (dst_ssa, dst_bytes)) in
-                    iter_ssa_bytes(dst_vec, dst_bytes).enumerate()
+                    dst_vec.iter_zip_bytes(dst_bytes).enumerate()
                 {
                     if let Some(src_vec) = src_vec {
                         debug_assert_eq!(src_vec.len(), dst_vec.len());
@@ -2099,7 +2333,7 @@ impl GlobalRegAlloc<'_> {
         }
 
         // Clean up by unpinning everything
-        self.local.pinned.clear();
+        self.pinned.clear();
 
         // After the block is done, nothing is used
         self.local.used.clear();
@@ -2125,7 +2359,7 @@ impl GlobalRegAlloc<'_> {
     fn alloc_regs_block(
         &mut self,
         cfg: &mut CFG<BasicBlock>,
-        live: &impl Liveness,
+        live: &Liveness,
         ssa_alloc: &mut SSAValueAllocator,
         bi: usize,
         phi_map: &PhiMap,
@@ -2229,7 +2463,7 @@ impl GlobalRegAlloc<'_> {
     }
 }
 
-fn alloc_regs(s: &mut Shader, arena: &Arena, live: impl Liveness) {
+fn alloc_regs(s: &mut Shader, arena: &Arena, live: Liveness) {
     let phi_map = PhiMap::for_shader(s);
     let affinities = AffinityMap::for_shader(s, &arena, &live, &phi_map);
 
@@ -2246,194 +2480,44 @@ fn alloc_regs(s: &mut Shader, arena: &Arena, live: impl Liveness) {
     }
 }
 
-fn reg_ref_for_byte(b: u8, bytes: u8) -> RegRef {
-    let bytes = u16::from(b)..(u16::from(b) + u16::from(bytes));
-    RegRef::from_byte_range(bytes).unwrap()
+#[derive(Default)]
+struct SSARegMap {
+    ssa_bytes: FxHashMap<SSAValue, Range<u16>>,
 }
 
-fn ra_trivial(s: &mut Shader) {
-    let live = SimpleLiveness::for_shader(s);
+impl SSARegMap {
+    pub fn new() -> SSARegMap {
+        Default::default()
+    }
 
-    // Allocate in units of half registers.  We might be a dumb allocator but
-    // we can at least try to exercise Kraid's half register model.
-    let mut byte_used: BitSet = Default::default();
-    let mut ssa_b: FxHashMap<SSAValue, u8> = Default::default();
-
-    for (bi, block) in s.blocks.iter_mut().enumerate() {
-        let bl = live.block(bi);
-        for (ip, mut instr) in
-            std::mem::take(&mut block.instrs).into_iter().enumerate()
-        {
-            if let Op::RegIn(op) = instr.op {
-                let DstRef::SSA(vec) = op.dst.dst_ref else {
-                    panic!("We must have SSA destinations");
-                };
-
-                let b = op.reg.idx * 4 + op.reg.range.byte_offset();
-                let bytes = vec.bytes();
-                debug_assert_eq!(bytes, op.reg.bytes());
-
-                for (i, ssa) in vec.iter().enumerate() {
-                    ssa_b.insert(*ssa, b + u8::try_from(i * 4).unwrap());
-                }
-                for i in 0..bytes {
-                    let b = usize::from(b) + usize::from(i);
-                    assert!(!byte_used.contains(b));
-                    byte_used.insert(b);
-                }
-
-                // Drop the actual instruction on the floor
-                continue;
-            }
-
-            for src in instr.srcs_mut() {
-                let SrcRef::SSA(vec) = &mut src.src_ref else {
-                    continue;
-                };
-
-                let mut vec_b = 0;
-                for (i, ssa) in vec.iter().enumerate() {
-                    let b = *ssa_b.get(ssa).unwrap();
-
-                    if !bl.is_live_after_ip(ssa, ip) {
-                        let bytes = ssa.bits() / 8;
-                        for b in b..(b + bytes) {
-                            byte_used.remove(b.into());
-                        }
-                    }
-
-                    if i == 0 {
-                        vec_b = b;
-                    } else {
-                        // We don't know how to move registers
-                        assert_eq!(b, vec_b + u8::try_from(i * 4).unwrap());
-                    }
-                }
-
-                let reg = reg_ref_for_byte(vec_b, vec.bytes());
-                let swz = Swizzle::from(reg.range);
-                src.swizzle = swz
-                    .swizzle(src.swizzle)
-                    .expect("16-bit and smaller sources have to swizzle");
-                src.src_ref = reg.into();
-            }
-
-            let mut dst_regs = SmallVec::new();
-            for dst in instr.dsts() {
-                let DstRef::SSA(vec) = &dst.dst_ref else {
-                    continue;
-                };
-
-                let mut alloc_lanes = dst.lanes;
-                while !s.model.op_dst_supports_lanes(&instr.op, alloc_lanes) {
-                    alloc_lanes = widen_lanes(alloc_lanes);
-                }
-
-                let bytes = vec.bytes();
-                let alloc_bytes = alloc_lanes.bytes(bytes);
-                let (align_mul, align_off) = if bytes > 4 {
-                    debug_assert_eq!(alloc_lanes, DstLanes::All);
-                    (bytes.next_power_of_two(), 0)
-                } else if s.model.op_dst_is_staging_reg(&instr.op) {
-                    // Staging register writes respect lanes in the sense that
-                    // that's where they put the data but they may not do
-                    // partial writes correctly.
-                    (4, 0)
-                } else {
-                    alloc_lanes.align()
-                };
-
-                let mut alloc_start = 0;
-                let (b, reg) = loop {
-                    let b = byte_used.find_aligned_unset_range(
-                        alloc_start,
-                        alloc_bytes.into(),
-                        align_mul.into(),
-                        align_off.into(),
-                    );
-
-                    assert!(
-                        b + usize::from(bytes) <= 256,
-                        "Ran out of registers trying to allocate {vec}"
-                    );
-                    let b = b as u8;
-                    let reg = reg_ref_for_byte(b, alloc_bytes);
-                    let lanes = DstLanes::from(reg.range);
-
-                    match alloc_lanes {
-                        DstLanes::All => debug_assert_eq!(lanes, DstLanes::All),
-                        DstLanes::AnyB => debug_assert!(lanes.is_byte()),
-                        DstLanes::AnyH => debug_assert!(lanes.is_half()),
-                        DstLanes::AnyHF => debug_assert!(lanes.is_half()),
-                        DstLanes::HF0 => debug_assert_eq!(lanes, DstLanes::H0),
-                        DstLanes::HF1 => debug_assert_eq!(lanes, DstLanes::H1),
-                        _ => debug_assert_eq!(lanes, alloc_lanes),
-                    }
-
-                    if s.model.op_dst_supports_lanes(&instr.op, lanes) {
-                        break (b, reg);
-                    }
-
-                    alloc_start = usize::from(b) + 1;
-                };
-
-                // In case when the SSA value is smaller than the region we
-                // just allocated, adjust accordingly.
-                let (dst_mul, dst_off) = dst.lanes.align();
-                let b = (b & !(dst_mul - 1)) | dst_off;
-
-                for (i, ssa) in vec.iter().enumerate() {
-                    ssa_b.insert(*ssa, b + u8::try_from(i * 4).unwrap());
-                }
-
-                // In case when the SSA value is smaller than the region we
-                // just allocated, this only marks the bytes consumed by the
-                // SSA value as used.  This effectively kills the other bytes
-                // immediately.
-                for i in 0..bytes {
-                    byte_used.insert(usize::from(b) + usize::from(i));
-                }
-
-                dst_regs.push(reg);
-            }
-
-            for dst in instr.dsts() {
-                let DstRef::SSA(vec) = &dst.dst_ref else {
-                    continue;
-                };
-
-                for ssa in vec {
-                    if !bl.is_live_after_ip(ssa, ip) {
-                        let vec_b = *ssa_b.get(ssa).unwrap();
-                        let bytes = ssa.bits() / 8;
-                        for b in 0..bytes {
-                            byte_used.remove((vec_b + b).into());
-                        }
-                    }
-                }
-            }
-
-            debug_assert_eq!(instr.dsts().len(), dst_regs.len());
-            for (dst, reg) in instr.dsts_mut().iter_mut().zip(dst_regs) {
-                let new_dst = Dst::from(reg);
-                dst.dst_ref = new_dst.dst_ref;
-                dst.lanes = fold_lanes(new_dst.lanes, dst.lanes);
-            }
-
-            block.instrs.push(instr);
+    pub fn insert_ssa_ref(&mut self, vec: &SSARef, reg: RegRef) {
+        for (ssa, bytes) in vec.iter_zip_bytes(reg.byte_range()) {
+            self.ssa_bytes.insert(*ssa, bytes);
         }
-        s.info.registers_used = 64;
+    }
+
+    pub fn get_ssa_ref_reg(&self, vec: &SSARef) -> Option<RegRef> {
+        let mut vec_bytes = self.ssa_bytes.get(&vec[0])?.clone();
+        for i in 1..vec.len() {
+            let ssa_bytes = self.ssa_bytes.get(&vec[i])?;
+            if ssa_bytes.start == vec_bytes.end {
+                vec_bytes.end = ssa_bytes.end;
+            } else {
+                return None;
+            }
+        }
+        RegRef::from_byte_range(vec_bytes).ok()
     }
 }
 
 impl Shader<'_> {
-    // If multiple phis in a block read the same source, RA will need to insert
-    // at least one copy regardless, but the messy resulting phi webs means RA
-    // will end up inserting many copies (or even swaps). Instead, we lower away
-    // repeated sources pre-RA by inserting that single copy preemptively,
-    // allowing RA's phi web heuristics to do their job.
-    //
-    // This is less heavyhanded than a full CSSA lowering.
+    /// If multiple phis in a block read the same source, RA will need to insert
+    /// at least one copy regardless, but the messy resulting phi webs means RA
+    /// will end up inserting many copies (or even swaps). Instead, we lower
+    /// away repeated sources pre-RA by inserting that single copy preemptively,
+    /// allowing RA's phi web heuristics to do their job.
+    ///
+    /// This is less heavyhanded than a full CSSA lowering.
     fn lower_repeated_phi_srcs(&mut self) {
         let mut seen = BitSet::new();
         for block in &mut self.blocks {
@@ -2454,9 +2538,74 @@ impl Shader<'_> {
         }
     }
 
+    /// This pass propagates OpRegIn instructions with an OOB reg.  Since the
+    /// reg is OOB, we know we will never allocate a register, and therefore
+    /// never write to a register which conflicts with it.  So we can treat OOB
+    /// registers as constants and safely copy-propagate the OpRegIn without
+    /// worrying about their contents changing.  This is particularly useful
+    /// for blend shaders where we want to keep everything inside the first 16
+    /// registers but most of the preloads live in R48..64.
+    fn prop_oob_reg_in(&mut self, arena: &Arena) {
+        let model = self.model;
+        let mut map = SSARegMap::new();
+        self.map_instrs(|mut instr, _| {
+            if let Op::RegIn(op) = &instr.op {
+                let DstRef::SSA(vec) = &op.dst.dst_ref else {
+                    panic!("We must have SSA destinations");
+                };
+
+                if arena.is_reg_oob(&op.reg) {
+                    map.insert_ssa_ref(vec, op.reg);
+                    [].into()
+                } else {
+                    [instr].into()
+                }
+            } else {
+                for src_idx in 0..instr.srcs().len() {
+                    let src = &instr.srcs()[src_idx];
+                    let SrcRef::SSA(vec) = &src.src_ref else {
+                        continue;
+                    };
+
+                    let Some(reg) = map.get_ssa_ref_reg(vec) else {
+                        continue;
+                    };
+
+                    let swz = Swizzle::from(reg.range)
+                        .swizzle(src.swizzle)
+                        .expect("16-bit and smaller sources have to swizzle");
+                    if !model.op_src_supports_swizzle(&instr.op, src, swz) {
+                        continue;
+                    }
+
+                    let src = &mut instr.srcs_mut()[src_idx];
+                    src.src_ref = reg.into();
+                    src.swizzle = swz;
+                }
+                [instr].into()
+            }
+        });
+    }
+
     pub fn assign_registers(&mut self) {
-        if false {
-            return ra_trivial(self);
+        pass!(self.lower_repeated_phi_srcs());
+
+        if self.info.is_blend {
+            let arena = Arena::new_blend(self.model);
+
+            pass!(self.prop_oob_reg_in(&arena));
+
+            let live = Liveness::for_shader(self);
+            assert!(
+                live.max_live_bytes().reg <= u32::from(arena.limit()),
+                "Blend shaders cannot spill"
+            );
+
+            self.run_pass("allocating registers", |s| {
+                alloc_regs(s, &arena, live);
+            });
+            self.info.registers_used = arena.regs_used();
+            return;
         }
 
         let mut reg_limit: u16 = if DEBUG.contains(DebugFlags::SPILL) {
@@ -2465,9 +2614,7 @@ impl Shader<'_> {
             u16::from(self.model.max_reg_count()) * 4
         };
 
-        pass!(self.lower_repeated_phi_srcs());
-
-        let mut live = SimpleLiveness::for_shader(self);
+        let mut live = Liveness::for_shader(self);
         let max_live = live.max_live_bytes();
         assert_eq!(max_live.mem, 0);
         if max_live.reg > u32::from(reg_limit) {
@@ -2484,7 +2631,7 @@ impl Shader<'_> {
             pass!(self.repair_ssa());
             pass!(self.opt_dce());
 
-            live = SimpleLiveness::for_shader(self)
+            live = Liveness::for_shader(self)
         }
 
         let max_live = live.max_live_bytes();
@@ -2504,7 +2651,7 @@ impl Shader<'_> {
             });
             self.info.tls_size = mem_arena.bytes_used().into();
 
-            live = SimpleLiveness::for_shader(self)
+            live = Liveness::for_shader(self)
         }
 
         let live_reg_bytes = max_live.reg.try_into().unwrap();

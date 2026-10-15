@@ -84,7 +84,6 @@ with_nir_headers_only = not with_gfx_compute or (
   not [
     with_gallium_va,
     with_any_vk,
-    with_gallium_st_d3d10umd,
     with_gallium_rusticl,
     with_microsoft_clc,
     with_spirv_to_dxil,
@@ -306,6 +305,7 @@ else
   'nir_opt_shrink_stores.c',
   'nir_opt_shrink_vectors.c',
   'nir_opt_sink.c',
+  'nir_opt_uadd_carry.c',
   'nir_opt_undef.c',
   'nir_opt_uniform_atomics.c',
   'nir_opt_uniform_subgroup.c',

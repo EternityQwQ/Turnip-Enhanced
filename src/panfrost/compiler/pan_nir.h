@@ -242,13 +242,13 @@ bool pan_nir_lower_image_64bit(nir_shader *shader);
 bool pan_nir_lower_var_special_pan(nir_shader *shader);
 bool pan_nir_lower_noperspective_vs(nir_shader *shader);
 
-bool pan_nir_lower_vs_inputs(nir_shader *shader, uint64_t gpu_id);
+bool pan_nir_lower_vs_inputs(nir_shader *shader);
 
-bool pan_nir_lower_vs_outputs(nir_shader *shader, uint64_t gpu_id,
+bool pan_nir_lower_vs_outputs(nir_shader *shader, unsigned arch,
                               const struct pan_varying_layout *varying_layout,
                               bool has_idvs, bool *needs_extended_fifo);
 
-bool pan_nir_lower_fs_inputs(nir_shader *shader, uint64_t gpu_id,
+bool pan_nir_lower_fs_inputs(nir_shader *shader, unsigned arch,
                              const struct pan_varying_layout *varying_layout,
                              struct pan_shader_info *info);
 
@@ -293,7 +293,6 @@ nir_intrinsic_pan_bi_tex_flags(const nir_intrinsic_instr *instr)
 PRAGMA_DIAGNOSTIC_PUSH
 PRAGMA_DIAGNOSTIC_ERROR(-Wpadded)
 struct pan_va_tex_flags {
-   bool skip : 1;
    bool wide_indices : 1;
    bool array_enable : 1;
    bool texel_offset : 1;
@@ -303,6 +302,12 @@ struct pan_va_tex_flags {
    bool force_delta_enable : 1;
    bool lod_bias_disable : 1;
    bool lod_clamp_disable : 1;
+   /* For 1D, 2D and 3D textures, this makes the hardware read an extra q
+    * coordinate and divide the other coordinates by it. For cube maps, it
+    * instead makes the hardware build the cube map descriptor internally
+    * from the raw direction vector.
+    */
+   bool projection_enable : 1;
    unsigned _pad : 20;
 };
 PRAGMA_DIAGNOSTIC_POP
@@ -333,8 +338,8 @@ static_assert(sizeof(struct pan_bi_var_special_flags) == 4, "Must fit in uint32_
 
 void pan_nir_lower_mediump_io(nir_shader *nir);
 
-bool pan_nir_lower_tex(nir_shader *nir, uint64_t gpu_id);
-bool pan_nir_lower_image(nir_shader *nir, uint64_t gpu_id);
+bool pan_nir_lower_tex(nir_shader *nir, unsigned arch);
+bool pan_nir_lower_image(nir_shader *nir, unsigned arch);
 
 bool pan_nir_lower_mem_to_global(nir_shader *nir);
 
@@ -356,7 +361,7 @@ bool pan_nir_resize_varying_io(nir_shader *nir,
                                struct pan_varying_layout *varying_fmt,
                                const struct pan_varying_layout *varying_layout);
 
-bool pan_nir_fuse_io_cvt(nir_shader *nir, uint64_t gpu_id,
+bool pan_nir_fuse_io_cvt(nir_shader *nir,
                          const struct pan_varying_layout *layout);
 
 bool pan_nir_opt_push_ubo(nir_shader *nir,

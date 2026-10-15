@@ -223,8 +223,7 @@ static int si_init_surface(struct si_screen *sscreen, struct radeon_surf *surfac
             flags |= RADEON_SURF_NO_HTILE;
       }
 
-      if (!is_imported && (!(ptex->bind & PIPE_BIND_SCANOUT) ||
-                           sscreen->info.gfx12_supports_display_dcc)) {
+      if (!is_imported) {
          enum pipe_format format = util_format_get_depth_only(ptex->format);
 
          /* These should be set for both color and Z/S. */
@@ -1175,7 +1174,8 @@ static struct si_texture *si_texture_create_object(struct pipe_screen *screen,
        *
        * Sparse textures don't have any backing storage at this point.
        */
-      if (!(base->flags & PIPE_RESOURCE_FLAG_SPARSE))
+      if (!(base->flags & PIPE_RESOURCE_FLAG_SPARSE) &&
+          !(surface->flags & RADEON_SURF_IMPORTED))
          si_set_tex_bo_metadata(sscreen, tex);
       return tex;
    }
@@ -1696,14 +1696,23 @@ si_get_dmabuf_modifier_planes(struct pipe_screen *pscreen, uint64_t modifier,
 {
    unsigned planes = util_format_get_num_planes(format);
 
+   if (!IS_AMD_FMT_MOD(modifier))
+      return planes;
+
    if (AMD_FMT_MOD_GET(TILE_VERSION, modifier) < AMD_FMT_MOD_TILE_VER_GFX12) {
-      if (IS_AMD_FMT_MOD(modifier) && planes == 1) {
-         if (AMD_FMT_MOD_GET(DCC_RETILE, modifier))
+      if (planes == 1) {
+         if (ac_modifier_has_dcc_retile(modifier))
             return 3;
-         else if (AMD_FMT_MOD_GET(DCC, modifier))
+         else if (ac_modifier_has_dcc(modifier))
             return 2;
          else
             return 1;
+      }
+
+      /* Disallow multi-plane formats with macrotiling, for now. */
+      if (AMD_FMT_MOD_GET(TILE_VERSION, modifier) == AMD_FMT_MOD_TILE_VER_GFX6 &&
+          AMD_FMT_MOD_GET(TILE, modifier) >= AMD_FMT_MOD_TILE_GFX6_2D_TILED_THIN1) {
+         return 1;
       }
    }
 
@@ -2544,7 +2553,7 @@ void si_init_screen_texture_functions(struct si_screen *sscreen)
     * which works around some applications using modifiers that are not
     * allowed in combination with lack of error reporting in
     * gbm_dri_surface_create */
-   if (sscreen->info.gfx_level >= GFX9 && sscreen->info.kernel_has_modifiers) {
+   if (sscreen->info.kernel_has_modifiers) {
       sscreen->b.resource_create_with_modifiers = si_texture_create_with_modifiers;
       sscreen->b.query_dmabuf_modifiers = si_query_dmabuf_modifiers;
       sscreen->b.is_dmabuf_modifier_supported = si_is_dmabuf_modifier_supported;

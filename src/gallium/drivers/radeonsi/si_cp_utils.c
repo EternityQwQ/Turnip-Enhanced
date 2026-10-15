@@ -26,30 +26,3 @@ void si_cp_release_acquire_mem_pws(struct si_context *sctx, struct radeon_cmdbuf
    if (unlikely(sctx->sqtt_enabled))
       si_sqtt_describe_barrier_end(sctx, cs, sqtt_flush_flags);
 }
-
-void si_cp_acquire_mem(struct si_context *sctx, struct radeon_cmdbuf *cs, unsigned gcr_cntl,
-                       unsigned engine)
-{
-   const enum amd_ip_type ip_type = sctx->is_gfx_queue ? AMD_IP_GFX : AMD_IP_COMPUTE;
-
-   if (sctx->gfx_level >= GFX10) {
-      ac_emit_cp_acquire_mem(&cs->current, sctx->gfx_level, ip_type, engine,
-                             gcr_cntl);
-   } else {
-      bool compute_ib = !sctx->is_gfx_queue;
-
-      /* This seems problematic with GFX7 (see #4764) */
-      if (sctx->gfx_level != GFX7)
-         gcr_cntl |= 1u << 31; /* don't sync PFP, i.e. execute the sync in ME */
-
-      ac_emit_cp_acquire_mem(&cs->current, sctx->gfx_level, ip_type, engine,
-                             gcr_cntl);
-
-      /* ACQUIRE_MEM & SURFACE_SYNC roll the context if the current context is busy. */
-      if (!compute_ib)
-         sctx->context_roll = true;
-
-      if (engine == V_581A_PREFETCH_PARSER)
-         ac_emit_cp_pfp_sync_me(&cs->current, false);
-   }
-}

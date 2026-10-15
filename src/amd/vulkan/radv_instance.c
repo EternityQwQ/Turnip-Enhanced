@@ -145,6 +145,7 @@ static const struct debug_control radv_experimental_options[] = {
    {"sparse", RADV_EXPERIMENTAL_SPARSE},
    {"bfloat16", RADV_EXPERIMENTAL_BFLOAT16},
    {"msrtss", RADV_EXPERIMENTAL_MSRTSS},
+   {"elf", RADV_EXPERIMENTAL_ELF},
    {NULL, 0},
 };
 
@@ -323,6 +324,11 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
 
    if (RADV_DEBUG(instance, STARTUP))
       fprintf(stderr, "radv: info: Created an instance.\n");
+
+   if (RADV_DEBUG(instance, ZERO_VRAM)) {
+      fprintf(stderr, "radv: WARNING: RADV_DEBUG=zerovram is deprecated and it will be removed in"
+                      " future Mesa releases.\n");
+   }
 
    VG(VALGRIND_CREATE_MEMPOOL(instance, 0, false));
 

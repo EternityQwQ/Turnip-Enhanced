@@ -27,6 +27,7 @@
 
 #include "etnaviv_screen.h"
 
+#include "layout/eil_format.h"
 #include "hw/common.xml.h"
 
 #include "etnaviv_compiler.h"
@@ -258,7 +259,8 @@ etna_init_screen_caps(struct etna_screen *screen)
    caps->string_marker = true;
    caps->frontend_noop = true;
    caps->framebuffer_no_attachment = true;
-   caps->vertex_input_alignment = PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
+   caps->vertex_input_alignment = screen->info->halti >= 0 ?
+      PIPE_VERTEX_INPUT_ALIGNMENT_NONE : PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
    caps->native_fence_fd = screen->drm_version >= ETNA_DRM_VERSION_FENCE_FD;
    caps->fs_position_is_sysval = true;
    caps->fs_face_is_integer_sysval = true; /* note: not integer */
@@ -268,10 +270,14 @@ etna_init_screen_caps(struct etna_screen *screen)
    caps->clear_scissored = screen->specs.use_blt;
    caps->clear_masked = screen->specs.use_blt &&
                         VIV_FEATURE(screen, ETNA_FEATURE_BLT_64BPP_MASKED_CLEAR_FIX);
+   caps->blend_equation_advanced =
+      VIV_FEATURE(screen, ETNA_FEATURE_PE_ADVANCE_BLEND_PART0) ?
+      ETNA_ADVANCED_BLEND_MODES : 0;
 
    /* Memory */
    caps->constant_buffer_offset_alignment = 256;
    caps->min_map_buffer_alignment = 4096;
+   caps->invalidate_buffer = true;
 
    caps->npot_textures = true; /* VIV_FEATURE(priv->dev, chipMinorFeatures1, NON_POWER_OF_TWO); */
 
@@ -286,12 +292,16 @@ etna_init_screen_caps(struct etna_screen *screen)
 
    caps->draw_indirect = VIV_FEATURE(screen, ETNA_FEATURE_HALTI5);
 
+   caps->glsl_feature_level =
+   caps->glsl_feature_level_compatibility = screen->info->halti >= 2 ? 130 : 120;
+
    /* Unsupported features. */
    caps->texture_buffer_offset_alignment = false;
    caps->texrect = false;
 
    /* Stream output. */
-   caps->max_stream_output_buffers = VIV_FEATURE(screen, ETNA_FEATURE_HWTFB) || DBG_ENABLED(ETNA_DBG_DEQP) ? 4 : 0;
+   caps->max_stream_output_buffers = VIV_FEATURE(screen, ETNA_FEATURE_HWTFB) ||
+                                     screen->info->halti >= 2 ? 4 : 0;
    caps->max_stream_output_separate_components = 64;
    caps->max_stream_output_interleaved_components = 64;
 
@@ -452,7 +462,7 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
    /* 128-bit formats sample as paired planes: G32R32F via the half-float pipe,
     * G32R32I only on halti5+.
     */
-   if (format_is_128bit(format))
+   if (eil_format_is_emulated_128bit(format))
       supported = util_format_is_pure_integer(format)
          ? VIV_FEATURE(screen, ETNA_FEATURE_HALTI5)
          : VIV_FEATURE(screen, ETNA_FEATURE_HALF_FLOAT);
@@ -477,6 +487,28 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
 }
 
 static bool
+gpu_supports_multisampled_blitter_resolve(const struct etna_screen *screen,
+                                          enum pipe_format format, unsigned sample_count)
+{
+   if (sample_count != ETNA_MAX_SAMPLES ||
+       !screen->base.caps.texture_multisample)
+      return false;
+
+   switch (format) {
+   case PIPE_FORMAT_R16_FLOAT:
+   case PIPE_FORMAT_R16G16_FLOAT:
+   case PIPE_FORMAT_R11G11B10_FLOAT:
+      /* handled by u_blitter */
+      return true;
+   default:
+      return !screen->specs.use_blt &&
+             util_format_get_blocksize(format) <= 4 &&
+             (util_format_is_unorm(format) ||
+              util_format_is_pure_integer(format));
+   }
+}
+
+static bool
 gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
                            unsigned sample_count)
 {
@@ -487,7 +519,8 @@ gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
 
    if (sample_count > 1) {
       if (screen->specs.use_blt) {
-         if (translate_blt_format(format) == ETNA_NO_MATCH)
+         if (translate_blt_format(format) == ETNA_NO_MATCH &&
+             !gpu_supports_multisampled_blitter_resolve(screen, format, sample_count))
             return false;
       } else {
          if (util_format_is_pure_integer(format) &&
@@ -496,11 +529,7 @@ gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
 
          /* RS format or u_blitter fallback support */
          if (translate_rs_format(format, screen->info->halti >= 5) == ETNA_NO_MATCH &&
-             (util_format_get_blocksize(format) > 4 ||
-              (!util_format_is_unorm(format) &&
-               !util_format_is_pure_integer(format)) ||
-              sample_count != ETNA_MAX_SAMPLES ||
-              !screen->base.caps.texture_multisample))
+             !gpu_supports_multisampled_blitter_resolve(screen, format, sample_count))
             return false;
       }
    }
@@ -516,7 +545,7 @@ gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
       return VIV_FEATURE(screen, ETNA_FEATURE_HALTI3);
 
    /* 128-bit formats render as paired G32R32F targets via the half-float pipe. */
-   if (format_is_128bit(format))
+   if (eil_format_is_emulated_128bit(format))
       return VIV_FEATURE(screen, ETNA_FEATURE_HALF_FLOAT);
 
    if (util_format_is_pure_integer(format) || util_format_is_float(format))
@@ -535,7 +564,7 @@ gpu_supports_render_format(struct etna_screen *screen, enum pipe_format format,
 static bool
 gpu_supports_vertex_format(struct etna_screen *screen, enum pipe_format format)
 {
-   if (translate_vertex_format_type(format) == ETNA_NO_MATCH)
+   if (!eil_get_format_entry(format)->has_vtx)
       return false;
 
    if (util_format_is_pure_integer(format))
@@ -988,6 +1017,9 @@ etna_get_specs(struct etna_screen *screen)
 
    screen->specs.max_vs_outputs = screen->info->halti >= 5 ? 32 : 16;
 
+   if (screen->info->halti >= 5)
+      screen->specs.vs_usc_budget = etna_core_vs_usc_budget(screen->info);
+
    screen->specs.max_varyings = MIN3(ETNA_NUM_VARYINGS,
                                      info->gpu.max_varyings,
                                      /* one output slot used for position */
@@ -1004,8 +1036,10 @@ etna_get_specs(struct etna_screen *screen)
    screen->specs.pe_multitiled = screen->specs.pixel_pipes > 1 &&
                                  !screen->specs.single_buffer;
 
-   screen->specs.tex_astc = VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_ASTC) &&
-                            !VIV_FEATURE(screen, ETNA_FEATURE_NO_ASTC);
+   if (VIV_FEATURE(screen, ETNA_FEATURE_TEXTURE_ASTC) &&
+       !VIV_FEATURE(screen, ETNA_FEATURE_NO_ASTC))
+      perf_debug_ctx(NULL, "Hardware ASTC disabled, ASTC is decoded on the CPU");
+   screen->specs.tex_astc = false;
 
    screen->specs.use_blt = VIV_FEATURE(screen, ETNA_FEATURE_BLT_ENGINE);
 
@@ -1045,10 +1079,7 @@ etna_screen_bo_from_handle(struct pipe_screen *pscreen,
 static struct disk_cache *
 etna_get_disk_shader_cache(struct pipe_screen *pscreen)
 {
-   struct etna_screen *screen = etna_screen(pscreen);
-   struct etna_compiler *compiler = screen->compiler;
-
-   return compiler->disk_cache;
+   return etna_screen(pscreen)->disk_cache;
 }
 
 static int

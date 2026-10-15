@@ -155,51 +155,48 @@ populate_dag(struct sched_ctx *ctx, jay_block *block)
       } else {
          jay_def dsts[3] = { I->dst, I->cond_flag };
 
-         /* MUL_32 is a macro implicitly clobbering acc0/acc1. TODO: Duplicate.
-          */
+         /* MUL_32 is a macro implicitly clobbering integer acc0 */
          if (I->op == JAY_OPCODE_MUL_32) {
-            unsigned n = ctx->func->shader->dispatch_width < 32 ? 2 : 1;
-            dsts[2] = jay_bare_regs(ACCUM, 0, n);
+            dsts[2] = jay_bare_reg(ACCUM, 0);
          }
 
          for (unsigned d = 0; d < ARRAY_SIZE(dsts); ++d) {
-            struct jay_range key = jay_def_to_range(ctx->func, I, dsts[d]);
-            for (unsigned i = 0; i < key.width; ++i) {
+            struct jay_footprint fp =
+               jay_def_to_footprint(ctx->func, I, dsts[d], I->type);
+
+            jay_foreach_in_footprint(fp, key) {
                /* Write-after-write */
-               add_edge(ctx, ctx->postra.writer[key.base + i], first_node,
-                        true);
-               ctx->postra.writer[key.base + i] = ctx->dag.node;
+               add_edge(ctx, ctx->postra.writer[key], first_node, true);
+               ctx->postra.writer[key] = ctx->dag.node;
 
                /* Write-after-read, this is a weak edge */
-               util_dynarray_foreach(&ctx->postra.readers[key.base + i],
-                                     uint32_t, it) {
+               util_dynarray_foreach(&ctx->postra.readers[key], uint32_t, it) {
                   add_edge(ctx, *it, first_node, false);
                }
 
-               util_dynarray_clear(&ctx->postra.readers[key.base + i]);
+               util_dynarray_clear(&ctx->postra.readers[key]);
             }
          }
 
          jay_foreach_src(I, s) {
-            struct jay_range key = jay_def_to_range(ctx->func, I, I->src[s]);
-            for (unsigned i = 0; i < key.width; ++i) {
+            struct jay_footprint fp =
+               jay_def_to_footprint(ctx->func, I, I->src[s],
+                                    jay_src_type(I, s));
+
+            jay_foreach_in_footprint(fp, key) {
                /* Read-after-write */
-               add_edge(ctx, ctx->postra.writer[key.base + i], first_node,
-                        true);
+               add_edge(ctx, ctx->postra.writer[key], first_node, true);
 
                /* Track for write-after-read but do not add a dependency, we
                 * want to reorder readers freely.
                 */
-               util_dynarray_append(&ctx->postra.readers[key.base + i],
-                                    ctx->dag.node);
+               util_dynarray_append(&ctx->postra.readers[key], ctx->dag.node);
             }
          }
       }
 
       /* Serialize address register access until we have an address RA */
-      bool use_a0 = I->dst.file == J_ADDRESS ||
-                    I->op == JAY_OPCODE_SHUFFLE ||
-                    I->op == JAY_OPCODE_VECTOR_EXTRACT;
+      bool use_a0 = I->dst.file == J_ADDRESS || I->op == JAY_OPCODE_SHUFFLE;
       jay_foreach_src(I, s) {
          use_a0 |= I->src[s].file == J_ADDRESS;
       }
@@ -570,7 +567,7 @@ pass(jay_function *f)
    }
 
    if (sctx.phase >= POSTRA) {
-      uint32_t keys = jay_range_base(f->shader, ~0);
+      uint32_t keys = jay_footprint_base(f->shader, ~0);
       sctx.postra.writer = linear_zalloc_array(linctx, uint32_t, keys);
       sctx.postra.readers =
          linear_zalloc_array(linctx, struct util_dynarray, keys);
@@ -601,7 +598,7 @@ pass(jay_function *f)
 
    if (sctx.phase == POSTSPILL) {
       jay_foreach_ssa_file(file) {
-         sctx.demand_limit[file] = jay_num_regs(f->shader, file);
+         sctx.demand_limit[file] = f->shader->num_regs[file];
       }
 
       for (unsigned i = 0; i < f->shader->partition.nr_blocks[UGPR]; ++i) {

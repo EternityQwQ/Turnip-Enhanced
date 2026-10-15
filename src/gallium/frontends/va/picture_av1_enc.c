@@ -830,41 +830,6 @@ static bool av1_frame_header(vlVaContext *context, struct vl_vlc *vlc,
    return true;
 }
 
-static void av1_metatype_hdr_cll(vlVaContext *context, struct vl_vlc *vlc)
-{
-   struct pipe_av1_enc_picture_desc *av1 = &context->desc.av1enc;
-
-   av1->metadata_flags.hdr_cll = 1;
-   av1->metadata_hdr_cll.max_cll = av1_f(vlc, 16);
-   av1->metadata_hdr_cll.max_fall = av1_f(vlc, 16);
-}
-
-static void av1_metatype_hdr_mdcv(vlVaContext *context, struct vl_vlc *vlc)
-{
-   struct pipe_av1_enc_picture_desc *av1 = &context->desc.av1enc;
-
-   av1->metadata_flags.hdr_mdcv = 1;
-
-   for (int32_t i = 0; i < 3; i++) {
-      av1->metadata_hdr_mdcv.primary_chromaticity_x[i] = av1_f(vlc, 16);
-      av1->metadata_hdr_mdcv.primary_chromaticity_y[i] = av1_f(vlc, 16);
-   }
-   av1->metadata_hdr_mdcv.white_point_chromaticity_x = av1_f(vlc, 16);
-   av1->metadata_hdr_mdcv.white_point_chromaticity_y = av1_f(vlc, 16);
-   av1->metadata_hdr_mdcv.luminance_max = av1_f(vlc, 32);
-   av1->metadata_hdr_mdcv.luminance_min = av1_f(vlc, 32);
-}
-
-static void av1_meta_obu(vlVaContext *context, struct vl_vlc *vlc)
-{
-   unsigned meta_type = av1_uleb128(vlc);
-
-   if (meta_type == METADATA_TYPE_HDR_CLL)
-      av1_metatype_hdr_cll(context, vlc);
-   else if (meta_type == METADATA_TYPE_HDR_MDCV)
-      av1_metatype_hdr_mdcv(context, vlc);
-}
-
 VAStatus
 vlVaHandleVAEncPackedHeaderDataBufferTypeAV1(vlVaContext *context, vlVaBuffer *buf)
 {
@@ -876,8 +841,7 @@ vlVaHandleVAEncPackedHeaderDataBufferTypeAV1(vlVaContext *context, vlVaBuffer *b
 
    if (obu_type != OBU_TYPE_SEQUENCE_HEADER &&
        obu_type != OBU_TYPE_FRAME_HEADER &&
-       obu_type != OBU_TYPE_FRAME &&
-       obu_type != OBU_TYPE_META) {
+       obu_type != OBU_TYPE_FRAME) {
       vlVaAddRawHeader(&context->desc.av1enc.raw_headers, obu_type,
                        buf->size, buf->data, false, 0);
       return VA_STATUS_SUCCESS;
@@ -905,8 +869,6 @@ vlVaHandleVAEncPackedHeaderDataBufferTypeAV1(vlVaContext *context, vlVaBuffer *b
       av1_sequence_header(context, &vlc);
    else if (obu_type == OBU_TYPE_FRAME_HEADER || obu_type == OBU_TYPE_FRAME)
       is_frame = av1_frame_header(context, &vlc, extension_flag, temporal_id, spatial_id);
-   else if (obu_type == OBU_TYPE_META)
-      av1_meta_obu(context, &vlc);
 
    vlVaAddRawHeader(&context->desc.av1enc.raw_headers, obu_type,
                     buf->size, buf->data, is_frame, 0);

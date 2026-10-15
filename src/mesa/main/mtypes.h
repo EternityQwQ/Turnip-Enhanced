@@ -1476,6 +1476,10 @@ struct gl_buffer_object
 
    struct gl_buffer_mapping Mappings[MAP_COUNT];
    struct pipe_transfer *transfer[MAP_COUNT];
+
+   /** Is set to size of a needed pointer range the failure path of
+    *  glMapBuffer*Range (access=GL_MAP_CLIENT_POINTER_BIT_MESA)  */
+   unsigned ClientPointerSize;
 };
 
 
@@ -1639,6 +1643,15 @@ struct gl_vertex_array_object
    GLbitfield NonIdentityBufferAttribMapping;
 
    /**
+    * Mask of vertex attributes whose VertexAttrib[i].Format._PipeFormat is
+    * set in gl_array_attrib::VertexFormatFallbacks, i.e. the attributes that
+    * the driver can only draw with after u_vbuf has translated them.
+    * This is indexed like Enabled and is updated for all attributes
+    * regardless of whether they are enabled.
+    */
+   GLbitfield FormatFallbackMask;
+
+   /**
     * Mask indicating which VertexAttrib and BufferBinding structures have
     * been changed since the VAO creation. No bit is ever cleared to 0 by
     * state updates. Setting to the default state doesn't update this.
@@ -1718,6 +1731,12 @@ struct gl_array_attrib
     * by polygon mode to be not drawn. (i.e. culled)
     */
    bool _PolygonModeAlwaysCulls;
+
+   /**
+    * The vertex formats that the driver doesn't support and that u_vbuf has
+    * to translate. This is set at context creation and never changes.
+    */
+   BITSET_DECLARE(VertexFormatFallbacks, PIPE_FORMAT_COUNT);
 
    /**
     * If gallium vertex buffers are dirty, this flag indicates whether gallium
@@ -2509,6 +2528,9 @@ struct gl_shared_state
     */
    bool HasExternallySharedImages;
 
+   /** MESA_map_buffer_client_pointer */
+   struct pipe_clientptr_heap *ClientPointerHeap;
+
    /* Small display list storage */
    struct {
       union gl_dlist_node *ptr;
@@ -2565,12 +2587,6 @@ struct gl_renderbuffer
 
    /** Delete this renderbuffer */
    void (*Delete)(struct gl_context *ctx, struct gl_renderbuffer *rb);
-
-   /** Allocate new storage for this renderbuffer */
-   GLboolean (*AllocStorage)(struct gl_context *ctx,
-                             struct gl_renderbuffer *rb,
-                             GLenum internalFormat,
-                             GLuint width, GLuint height);
 
    struct pipe_resource *texture;
    enum pipe_format format_linear;
@@ -2934,6 +2950,9 @@ struct gl_driver_flags
 
    /** For GL_CLAMP emulation */
    st_state_bitset NewSamplersWithClamp;
+
+   /** For polygon stipple emulation: the current draw's primitive type or the emulation state changed. */
+   st_state_bitset NewStippleEmulate;
 };
 
 struct gl_buffer_binding
@@ -3666,6 +3685,14 @@ struct gl_context
 
    struct pipe_draw_start_count_bias *tmp_draws;
    unsigned num_tmp_draws;
+
+   /**
+    * \name GL_MESA_map_buffer_client_pointer
+    *
+    * Range sent to AddClientPointerRange is client state until
+    * consumed or released.
+    */
+   struct pipe_clientptr_range AddClientPointerRange;
 };
 
 #ifndef NDEBUG

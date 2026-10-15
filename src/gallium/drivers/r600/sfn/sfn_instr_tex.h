@@ -54,6 +54,7 @@ public:
       z_unnormalized,
       w_unnormalized,
       grad_fine,
+      alt_const,
       num_tex_flag
    };
 

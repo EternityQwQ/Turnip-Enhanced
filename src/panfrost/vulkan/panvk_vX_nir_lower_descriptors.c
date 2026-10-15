@@ -826,6 +826,17 @@ lower_tex(nir_builder *b, nir_tex_instr *tex, const struct lower_desc_ctx *ctx)
 
    b->cursor = nir_before_instr(&tex->instr);
 
+   /* Remove index for input attachments, since after this pass the index is
+    * reinterpreted to mean the HW handle.
+    */
+   if (tex->input_attachment_index) {
+      tex->texture_index = 0;
+      int offset_src =
+         nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
+      if (offset_src >= 0)
+         nir_tex_instr_remove_src(tex, offset_src);
+   }
+
    lower_tex_immutable(b, tex, ctx);
 
 #if PAN_ARCH < 9
@@ -1381,20 +1392,23 @@ upload_shader_desc_info(struct panvk_device *dev,
    assert(lower_info->dyn_ubos.count <=
           ARRAY_SIZE(desc_info->dyn_ubos.map));
    desc_info->dyn_ubos.count = lower_info->dyn_ubos.count;
-   memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
-          lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
+   if (lower_info->dyn_ubos.count != 0)
+      memcpy(desc_info->dyn_ubos.map, lower_info->dyn_ubos.map,
+             lower_info->dyn_ubos.count * sizeof(*desc_info->dyn_ubos.map));
    assert(lower_info->dyn_ssbos.count <=
           ARRAY_SIZE(desc_info->dyn_ssbos.map));
    desc_info->dyn_ssbos.count = lower_info->dyn_ssbos.count;
-   memcpy(
-      desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
-      lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
+   if (lower_info->dyn_ssbos.count != 0)
+      memcpy(
+         desc_info->dyn_ssbos.map, lower_info->dyn_ssbos.map,
+         lower_info->dyn_ssbos.count * sizeof(*desc_info->dyn_ssbos.map));
 #else
    assert(lower_info->dyn_bufs.count <=
           ARRAY_SIZE(desc_info->dyn_bufs.map));
    desc_info->dyn_bufs.count = lower_info->dyn_bufs.count;
-   memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
-          lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
+   if (lower_info->dyn_bufs.count != 0)
+      memcpy(desc_info->dyn_bufs.map, lower_info->dyn_bufs.map,
+             lower_info->dyn_bufs.count * sizeof(*desc_info->dyn_bufs.map));
 #endif
 
    desc_info->used_set_mask = lower_info->used_set_mask;

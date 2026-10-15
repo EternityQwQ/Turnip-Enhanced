@@ -283,7 +283,7 @@ uint32_t
 translate_texture_format(enum pipe_format fmt, const struct etna_screen *screen)
 {
    fmt = util_format_linear(fmt);
-   fmt = translate_emulated_format_z32f(fmt);
+   fmt = eil_format_emulated(fmt);
 
    if (!formats[fmt].present)
       return ETNA_NO_MATCH;
@@ -360,6 +360,14 @@ get_texture_swiz(enum pipe_format fmt, unsigned swizzle_r,
    unsigned char swiz[4] = {
       swizzle_r, swizzle_g, swizzle_b, swizzle_a,
    };
+
+   /* 128-bit texels are swizzled in the shader once the halves are joined. */
+   if (eil_format_is_emulated_128bit(fmt)) {
+      swiz[0] = PIPE_SWIZZLE_X;
+      swiz[1] = PIPE_SWIZZLE_Y;
+      swiz[2] = PIPE_SWIZZLE_Z;
+      swiz[3] = PIPE_SWIZZLE_W;
+   }
 
    if (unlikely(fmt == PIPE_FORMAT_DXT1_RGB)) {
       /* The HW uses the same decompression scheme for RGB and RGBA DXT1
@@ -456,14 +464,4 @@ translate_pe_internal_format(enum pipe_format fmt, const struct etna_screen *scr
    default:
       UNREACHABLE("unexpected rb_swap format");
    }
-}
-
-/* Return type flags for vertex element format */
-uint32_t
-translate_vertex_format_type(enum pipe_format fmt)
-{
-   if (!formats[fmt].present)
-      return ETNA_NO_MATCH;
-
-   return formats[fmt].vtx;
 }

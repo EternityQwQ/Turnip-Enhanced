@@ -3,7 +3,7 @@
 
 use crate::ir::*;
 use crate::liveness::*;
-use crate::ops::MemoryEffect;
+use crate::ops::{MemoryEffect, VaryingUpdateMode};
 use crate::ssa_value::SSAValueAllocator;
 use compiler::bitset::BitSet;
 use rustc_hash::FxHashMap;
@@ -36,6 +36,17 @@ fn is_barrier(op: &Op) -> bool {
 fn respects_barrier(op: &Op) -> bool {
     // ALU can freely slide past barriers
     is_barrier(op) || is_mem(op)
+}
+
+fn writes_var_hidden(op: &Op) -> bool {
+    match op.var_update_mode() {
+        VaryingUpdateMode::Store | VaryingUpdateMode::Clobber => true,
+        VaryingUpdateMode::Retrieve | VaryingUpdateMode::None => false,
+    }
+}
+
+fn uses_var_hidden(op: &Op) -> bool {
+    op.var_update_mode() != VaryingUpdateMode::None
 }
 
 struct DepTracker {
@@ -95,6 +106,12 @@ impl DepTracker {
         // IP of the last barrier instruction
         let mut mem_ip = usize::MAX;
 
+        // IP of the last instruction to access the varying hidden register
+        let mut var_ip = usize::MAX;
+
+        // IP of the last discard instruction
+        let mut discard_ip = usize::MAX;
+
         for ip in body_range.clone() {
             let instr = &block.instrs[ip];
             deps.add_ip(ip);
@@ -120,6 +137,21 @@ impl DepTracker {
                 mem_ip = ip;
             }
 
+            // Capture WaW and RaW hazards
+            if var_ip != usize::MAX && uses_var_hidden(&instr.op) {
+                deps.add_dep(ip, var_ip);
+            }
+            if writes_var_hidden(&instr.op) {
+                var_ip = ip;
+            }
+
+            if discard_ip != usize::MAX && instr.reads_discard() {
+                deps.add_dep(ip, discard_ip);
+            }
+            if instr.writes_discard() {
+                discard_ip = ip;
+            }
+
             for ssa in instr.iter_ssa_defs() {
                 def_ip.insert(*ssa, ip);
             }
@@ -127,6 +159,8 @@ impl DepTracker {
 
         bar_ip = usize::MAX;
         mem_ip = usize::MAX;
+        var_ip = usize::MAX;
+        discard_ip = usize::MAX;
         for ip in body_range.clone().rev() {
             let instr = &block.instrs[ip];
 
@@ -144,6 +178,21 @@ impl DepTracker {
             if is_mem_write(&instr.op) {
                 mem_ip = ip;
             }
+
+            // Capture WaR hazards
+            if var_ip != usize::MAX && uses_var_hidden(&instr.op) {
+                deps.add_dep(var_ip, ip);
+            }
+            if writes_var_hidden(&instr.op) {
+                var_ip = ip;
+            }
+
+            if discard_ip != usize::MAX && instr.reads_discard() {
+                deps.add_dep(discard_ip, ip);
+            }
+            if instr.writes_discard() {
+                discard_ip = ip;
+            }
         }
 
         deps
@@ -151,9 +200,10 @@ impl DepTracker {
 }
 
 fn pressure_schedule_block(
+    model: &dyn Model,
     ssa_alloc: &SSAValueAllocator,
     b: &mut BasicBlock,
-    bl: &impl BlockLiveness,
+    bl: &BlockLiveness,
 ) {
     let body_range = b.body_ip_range();
 
@@ -168,7 +218,7 @@ fn pressure_schedule_block(
     // in the live set or our estimates will be all out of whack.
     let mut max_live = LiveBytes::default();
     for ip in body_range.end..b.instrs.len() {
-        let bytes = live.insert_instr_bottom_up(&b.instrs[ip]);
+        let bytes = live.insert_instr_bottom_up(model, &b.instrs[ip]);
         max_live = max_live.max(bytes);
     }
 
@@ -213,7 +263,7 @@ fn pressure_schedule_block(
         end_ip -= 1;
         schedule[best_ip] = end_ip;
 
-        let bytes = live.insert_instr_bottom_up(&b.instrs[best_ip]);
+        let bytes = live.insert_instr_bottom_up(model, &b.instrs[best_ip]);
         max_live = max_live.max(bytes);
 
         deps.remove_ip(best_ip);
@@ -235,9 +285,14 @@ fn pressure_schedule_block(
 
 impl Shader<'_> {
     pub fn schedule_for_pressure(&mut self) {
-        let live = SimpleLiveness::for_shader(self);
+        let live = Liveness::for_shader(self);
         for (bi, block) in self.blocks.iter_mut().enumerate() {
-            pressure_schedule_block(&self.ssa_alloc, block, live.block(bi));
+            pressure_schedule_block(
+                self.model,
+                &self.ssa_alloc,
+                block,
+                live.block(bi),
+            );
         }
     }
 }

@@ -9,8 +9,6 @@
 
 #include "tu_image.h"
 
-#include <inttypes.h>
-
 #include "drm-uapi/drm_fourcc.h"
 
 #include "util/format/u_format.h"
@@ -191,7 +189,6 @@ tu_image_view_init(struct tu_device *device,
    assert(iview->vk.format != VK_FORMAT_UNDEFINED);
 
    iview->image = image;
-   iview->has_software_ycbcr = false;
 
    const struct fdl_layout *layouts[3];
 
@@ -268,11 +265,13 @@ tu_image_view_init(struct tu_device *device,
       UNREACHABLE("unknown view type");
    }
 
-   STATIC_ASSERT((unsigned)VK_CHROMA_LOCATION_COSITED_EVEN == (unsigned)FDL_CHROMA_LOCATION_COSITED_EVEN);
-   STATIC_ASSERT((unsigned)VK_CHROMA_LOCATION_MIDPOINT == (unsigned)FDL_CHROMA_LOCATION_MIDPOINT);
+   STATIC_ASSERT(static_cast<unsigned>(VK_CHROMA_LOCATION_COSITED_EVEN) ==
+                 static_cast<unsigned>(FDL_CHROMA_LOCATION_COSITED_EVEN));
+   STATIC_ASSERT(static_cast<unsigned>(VK_CHROMA_LOCATION_MIDPOINT) ==
+                 static_cast<unsigned>(FDL_CHROMA_LOCATION_MIDPOINT));
    if (conversion) {
-      args.chroma_offsets[0] = (enum fdl_chroma_location) conversion->state.chroma_offsets[0];
-      args.chroma_offsets[1] = (enum fdl_chroma_location) conversion->state.chroma_offsets[1];
+      args.chroma_offsets[0] = static_cast<enum fdl_chroma_location>(conversion->state.chroma_offsets[0]);
+      args.chroma_offsets[1] = static_cast<enum fdl_chroma_location>(conversion->state.chroma_offsets[1]);
    }
 
    if (sample_weights) {
@@ -284,29 +283,6 @@ tu_image_view_init(struct tu_device *device,
    }
 
    TU_CALLX(device, fdl6_view_init)(&iview->view, layouts, &args, device->use_z24uint_s8uint);
-
-   if (conversion &&
-       tu_format_uses_software_ycbcr(conversion->state.format) &&
-       image->vk.format == conversion->state.format &&
-       aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT &&
-       pCreateInfo->viewType == VK_IMAGE_VIEW_TYPE_2D &&
-       iview->vk.level_count == 1 && iview->vk.layer_count == 1) {
-      /* An R8 texel-buffer view is used for each plane.  Unlike an ordinary
-       * 2D texture descriptor, it gives the hardware an exact byte bound and
-       * does not impose a hidden row-pitch granularity.  Restrict this path
-       * to a single linear 2D subresource; this covers Android YV12 imports
-       * and avoids pretending that tiled or array-layer addressing is flat.
-       */
-      iview->has_software_ycbcr = true;
-      for (uint32_t plane = 0; plane < TU_MAX_PLANE_COUNT; plane++) {
-         const struct fdl_layout *layout = &image->layout[plane];
-         if (layout->tile_mode != TILE6_LINEAR || layout->ubwc ||
-             layout->cpp != 1) {
-            iview->has_software_ycbcr = false;
-            break;
-         }
-      }
-   }
 
    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
       VkImageAspectFlags other_aspect =
@@ -329,26 +305,12 @@ tu_image_view_init(struct tu_device *device,
    }
 }
 
-static bool
-tu_is_p010_format(VkFormat format)
-{
-   switch (format) {
-   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
-   case VK_FORMAT_R10X6_UNORM_PACK16:
-   case VK_FORMAT_R10X6G10X6_UNORM_2PACK16:
-      return true;
-   default:
-      return false;
-   }
-}
-
 bool
 tiling_possible(VkFormat format)
 {
    if (format == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM ||
        format == VK_FORMAT_G8B8G8R8_422_UNORM ||
-       format == VK_FORMAT_B8G8R8G8_422_UNORM ||
-       tu_is_p010_format(format))
+       format == VK_FORMAT_B8G8R8G8_422_UNORM)
       return false;
 
    return true;
@@ -387,8 +349,7 @@ ubwc_possible(struct tu_device *device,
     */
    if (vk_format_is_compressed(format) ||
        format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 ||
-       format == VK_FORMAT_S8_UINT ||
-       tu_is_p010_format(format))
+       format == VK_FORMAT_S8_UINT)
       return false;
 
    /* In copy_format, we treat snorm as unorm to avoid clamping.  But snorm
@@ -559,101 +520,11 @@ format_list_ubwc_possible(struct tu_device *dev,
    return true;
 }
 
-static bool
-tu_is_android_yv12_import(struct tu_image *image, uint64_t modifier, const VkSubresourceLayout *plane_layouts)
-{
-   const bool is_android_buffer = vk_image_is_android_hardware_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer_alias(&image->vk);
-
-   if (!plane_layouts || modifier != DRM_FORMAT_MOD_LINEAR || !is_android_buffer ||
-       image->vk.format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM || image->vk.image_type != VK_IMAGE_TYPE_2D ||
-       image->vk.samples != VK_SAMPLE_COUNT_1_BIT || image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
-       image->vk.extent.depth != 1 || image->vk.usage != VK_IMAGE_USAGE_SAMPLED_BIT || (image->vk.extent.width & 1) ||
-       (image->vk.extent.height & 1))
-      return false;
-
-   const uint64_t y_pitch = plane_layouts[0].rowPitch;
-   const uint64_t cb_pitch = plane_layouts[1].rowPitch;
-   const uint64_t cr_pitch = plane_layouts[2].rowPitch;
-
-   if (!y_pitch || !cb_pitch || y_pitch > UINT32_MAX || cb_pitch > UINT32_MAX || cr_pitch != cb_pitch ||
-       y_pitch < image->vk.extent.width || cb_pitch < y_pitch / 2 ||
-       cb_pitch < image->vk.extent.width / 2 || (y_pitch & 15) ||
-       (cb_pitch & 15))
-      return false;
-
-   const uint64_t height = image->vk.extent.height;
-   if (height > UINT64_MAX / y_pitch || height / 2 > UINT64_MAX / cb_pitch)
-      return false;
-
-   const uint64_t min_y_size = y_pitch * height;
-   const uint64_t min_chroma_size = cb_pitch * (height / 2);
-   const uint64_t y_size = plane_layouts[2].offset;
-   if (plane_layouts[1].offset < y_size)
-      return false;
-
-   const uint64_t chroma_size = plane_layouts[1].offset - y_size;
-   if (y_size < min_y_size || chroma_size < min_chroma_size ||
-       y_size > UINT32_MAX || chroma_size > (UINT32_MAX - y_size) / 2)
-      return false;
-
-   /* vk_android has already changed DRM Y-V-U plane order into Vulkan's
-    * logical Y-U-V order at this point.
-    */
-   return plane_layouts[0].offset == 0;
-}
-
-static bool
-tu_is_android_exact_linear_color_import(struct tu_image *image,
-                                        uint64_t modifier,
-                                        const VkSubresourceLayout *plane_layouts)
-{
-   const VkImageUsageFlags supported_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-                                             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
-                                             VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
-   const bool is_android_buffer = vk_image_is_android_hardware_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer_alias(&image->vk);
-
-   if (!is_android_buffer || !plane_layouts || modifier != DRM_FORMAT_MOD_LINEAR ||
-       tu6_plane_count(image->vk.format) != 1 || !vk_format_is_color(image->vk.format) ||
-       vk_format_is_depth_or_stencil(image->vk.format) || vk_format_is_compressed(image->vk.format) ||
-       image->vk.image_type != VK_IMAGE_TYPE_2D || image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
-       image->vk.mip_levels != 1 || image->vk.array_layers != 1 || image->vk.extent.depth != 1 ||
-       (image->vk.usage & ~supported_usage))
-      return false;
-
-   const enum pipe_format format = tu6_plane_format(image->vk.format, 0);
-   if (format == PIPE_FORMAT_NONE)
-      return false;
-
-   const uint64_t pitch = plane_layouts[0].rowPitch;
-   const uint64_t offset = plane_layouts[0].offset;
-   const uint64_t min_pitch = util_format_get_stride(format, image->vk.extent.width);
-   const uint64_t size = pitch * image->vk.extent.height;
-
-   /* Whether an imported AHB is writable is local to this VkImage.  The same
-    * allocation can be a color attachment in its producer and sampled-only
-    * in SurfaceFlinger, so it must not change the allocation's physical
-    * footprint.  Keep the accepted operations narrowly allowlisted above;
-    * attachment accesses are redirected to bounded GMEM paths below.
-    *
-    * fdl_explicit_layout and fdl_slice store these values in 32 bits.  Stay
-    * within those representations and verify that every logical row is
-    * present before dropping Turnip's private tail padding.
-    */
-   return pitch >= min_pitch && pitch <= UINT32_MAX && offset <= UINT32_MAX && size <= UINT32_MAX &&
-          offset + size <= UINT32_MAX;
-}
-
 template <chip CHIP>
 VkResult
 tu_image_init(struct tu_device *device, struct tu_image *image,
               const VkImageCreateInfo *pCreateInfo, uint64_t modifier,
               const VkSubresourceLayout *plane_layouts,
-              const struct vk_android_modifier_plane_layout *modifier_plane_layouts,
               enum tu_image_id_mode id_mode)
 {
    switch (id_mode) {
@@ -830,7 +701,6 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
 
    /* Layout computation begins here */
    enum a6xx_tile_mode tile_mode = TILE6_3;
-   image->android_external_no_gmem_padding = false;
 #if DETECT_OS_LINUX || DETECT_OS_BSD
    image->vk.drm_format_mod = modifier;
 #endif
@@ -872,17 +742,6 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
    assert(!(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) ||
           tile_mode == TILE6_3);
 
-   /* Android YV12 guarantees only 16-byte row-pitch alignment.  Accept that
-    * layout only for this exact single-level, sampled-only shared-buffer
-    * shape.  Sampling is later lowered to bounded texel-buffer loads, so the
-    * relaxed validation is never used for an ordinary R8 2D texture access
-    * with an unsupported pitch.
-    */
-   const bool android_yv12_import = tu_is_android_yv12_import(image, modifier, plane_layouts);
-   const bool android_exact_linear_color_import =
-      tu_is_android_exact_linear_color_import(image, modifier, plane_layouts);
-   image->android_external_no_gmem_padding = android_exact_linear_color_import;
-
    for (uint32_t i = 0; i < tu6_plane_count(image->vk.format); i++) {
       struct fdl_layout *layout = &image->layout[i];
       enum pipe_format format = tu6_plane_format(image->vk.format, i);
@@ -902,10 +761,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
          height0 += device->physical_device->info->tile_align_h;
       }
 
-      struct fdl_explicit_layout plane_layout = {
-         .pitch_alignment = android_yv12_import ? 16u : 0u,
-         .skip_last_level_padding = android_yv12_import || android_exact_linear_color_import,
-      };
+      struct fdl_explicit_layout plane_layout;
 
       if (plane_layouts) {
          /* Reject mipmap and 3D images; fdl6_layout_image only accepts
@@ -949,51 +805,6 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
                              &params, plane_layouts ? &plane_layout : NULL)) {
          assert(plane_layouts); /* can only fail with explicit layout */
          return vk_error(device, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT);
-      }
-
-      /* Gralloc reports QCOM UBWC metadata and primary-data regions
-       * independently.  The Vulkan modifier plane begins at the metadata,
-       * while fdl6_layout_image() derives both regions.  Refuse the import
-       * before any GPU access unless every authoritative value agrees.
-       */
-      const struct vk_android_modifier_plane_layout *gralloc_layout =
-         modifier_plane_layouts ? &modifier_plane_layouts[i] : NULL;
-      if (gralloc_layout && gralloc_layout->data_offset != UINT64_MAX) {
-         const uint64_t data_size =
-            layout->size >= layout->slices[0].offset
-               ? layout->size - layout->slices[0].offset
-               : UINT64_MAX;
-         const bool mismatch =
-            !plane_layouts || !layout->ubwc ||
-            layout->ubwc_slices[0].offset != plane_layouts[i].offset ||
-            layout->ubwc_slices[0].size0 != gralloc_layout->metadata_size ||
-            layout->slices[0].offset != gralloc_layout->data_offset ||
-            data_size != gralloc_layout->data_size ||
-            (gralloc_layout->metadata_row_pitch != 0 &&
-             fdl_ubwc_pitch(layout, 0) !=
-                gralloc_layout->metadata_row_pitch);
-         if (mismatch) {
-            mesa_loge("gralloc/Turnip modifier layout mismatch for plane %u: "
-                      "mapper metadata(offset=%" PRIu64
-                      ", pitch=%u, size=%" PRIu64
-                      "), data(offset=%" PRIu64 ", size=%" PRIu64
-                      "); Turnip metadata(offset=%" PRIu64
-                      ", pitch=%u, size=%" PRIu64
-                      "), data(offset=%" PRIu64 ", size=%" PRIu64 ")",
-                      i,
-                      plane_layouts ? plane_layouts[i].offset : UINT64_MAX,
-                      gralloc_layout->metadata_row_pitch,
-                      gralloc_layout->metadata_size,
-                      gralloc_layout->data_offset, gralloc_layout->data_size,
-                      static_cast<uint64_t>(layout->ubwc_slices[0].offset),
-                      layout->ubwc ? fdl_ubwc_pitch(layout, 0) : 0,
-                      static_cast<uint64_t>(layout->ubwc_slices[0].size0),
-                      static_cast<uint64_t>(layout->slices[0].offset),
-                      data_size);
-            return vk_error(
-               device,
-               VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT);
-         }
       }
 
       if (TU_DEBUG(LAYOUT))
@@ -1084,17 +895,11 @@ tu_android_get_wsi_memory(struct tu_device *dev,
 
    VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
    VkSubresourceLayout a_plane_layouts[TU_MAX_PLANE_COUNT];
-   struct vk_android_modifier_plane_layout
-      a_modifier_plane_layouts[TU_MAX_PLANE_COUNT];
-   result = vk_android_get_anb_layout_with_modifier_info(
-      img->vk.android_deferred_create_info, &eci, a_plane_layouts,
-      a_modifier_plane_layouts, TU_MAX_PLANE_COUNT);
+   result = vk_android_get_anb_layout(img->vk.android_deferred_create_info,
+                                      &eci, a_plane_layouts,
+                                      TU_MAX_PLANE_COUNT);
    if (result != VK_SUCCESS)
       return result;
-
-   if (eci.drmFormatModifierPlaneCount !=
-       tu6_plane_count(img->vk.android_deferred_create_info->format))
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
    VkExternalMemoryImageCreateInfo external_info = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -1105,8 +910,7 @@ tu_android_get_wsi_memory(struct tu_device *dev,
 
    result = TU_CALLX(dev, tu_image_init)(
       dev, img, img->vk.android_deferred_create_info,
-      eci.drmFormatModifier, a_plane_layouts, a_modifier_plane_layouts,
-      TU_IMAGE_ID_ASSIGN);
+      eci.drmFormatModifier, a_plane_layouts, TU_IMAGE_ID_ASSIGN);
    if (result != VK_SUCCESS)
       return result;
 
@@ -1129,7 +933,6 @@ tu_CreateImage(VkDevice _device,
 {
    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
    const VkSubresourceLayout *plane_layouts = NULL;
-   const struct vk_android_modifier_plane_layout *modifier_plane_layouts = NULL;
    VkResult result;
 
    VK_FROM_HANDLE(tu_device, device, _device);
@@ -1140,8 +943,8 @@ tu_CreateImage(VkDevice _device,
                                                pImage);
    }
 
-   struct tu_image *image = (struct tu_image *)
-      vk_image_create(&device->vk, pCreateInfo, alloc, sizeof(*image));
+   struct tu_image *image = static_cast<struct tu_image *>(
+      vk_image_create(&device->vk, pCreateInfo, alloc, sizeof(*image)));
 
    if (!image)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -1201,29 +1004,18 @@ tu_CreateImage(VkDevice _device,
    /* This section is removed by the optimizer for non-ANDROID builds */
    VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
    VkSubresourceLayout a_plane_layouts[TU_MAX_PLANE_COUNT];
-   struct vk_android_modifier_plane_layout
-      a_modifier_plane_layouts[TU_MAX_PLANE_COUNT];
    if (vk_image_is_android_native_buffer(&image->vk)) {
-      result = vk_android_get_anb_layout_with_modifier_info(
-         pCreateInfo, &eci, a_plane_layouts, a_modifier_plane_layouts,
-         TU_MAX_PLANE_COUNT);
+      result = vk_android_get_anb_layout(
+         pCreateInfo, &eci, a_plane_layouts, TU_MAX_PLANE_COUNT);
       if (result != VK_SUCCESS)
          goto fail;
 
-      if (eci.drmFormatModifierPlaneCount !=
-          tu6_plane_count(pCreateInfo->format)) {
-         result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-         goto fail;
-      }
-
       plane_layouts = a_plane_layouts;
-      modifier_plane_layouts = a_modifier_plane_layouts;
       modifier = eci.drmFormatModifier;
    }
 
    result = TU_CALLX(device, tu_image_init)(device, image, pCreateInfo,
                                              modifier, plane_layouts,
-                                             modifier_plane_layouts,
                                              TU_IMAGE_ID_ASSIGN);
    if (result != VK_SUCCESS)
       goto fail;
@@ -1343,16 +1135,6 @@ tu_image_bind(struct tu_device *device,
    }
 
    assert(mem);
-
-   const bool is_android_buffer = vk_image_is_android_hardware_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer_alias(&image->vk);
-   if (is_android_buffer && mem->bo && (offset > mem->bo->size || image->total_size > mem->bo->size - offset)) {
-      return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
-                       "Android image binding exceeds dma-buf size (%" PRIu64 " + %" PRIu64 " > %" PRIu64 ")", offset,
-                       image->total_size, mem->bo->size);
-   }
-
    image->mem = mem;
    image->mem_offset = offset;
    image->iova = mem->iova + offset;
@@ -1366,7 +1148,7 @@ tu_image_bind(struct tu_device *device,
             return result;
       }
 
-      image->map = (char *) mem->bo->map + offset;
+      image->map = static_cast<char *>(mem->bo->map) + offset;
    } else {
       image->map = NULL;
    }
@@ -1436,7 +1218,7 @@ tu_get_image_memory_requirements(struct tu_device *dev, struct tu_image *image,
       switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
-            (VkMemoryDedicatedRequirements *) ext;
+            static_cast<VkMemoryDedicatedRequirements *>(ext);
          req->requiresDedicatedAllocation =
             image->vk.external_handle_types != 0;
          req->prefersDedicatedAllocation = req->requiresDedicatedAllocation;
@@ -1636,9 +1418,7 @@ tu_GetDeviceImageMemoryRequirements(
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo,
-                                   DRM_FORMAT_MOD_INVALID, NULL, NULL,
-                                   TU_IMAGE_ID_NONE);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_memory_requirements(device, &image, pMemoryRequirements);
 }
@@ -1655,9 +1435,7 @@ tu_GetDeviceImageSparseMemoryRequirements(
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo,
-                                   DRM_FORMAT_MOD_INVALID, NULL, NULL,
-                                   TU_IMAGE_ID_NONE);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_sparse_memory_requirements(device, &image,
                                            pSparseMemoryRequirementCount,
@@ -1748,9 +1526,7 @@ tu_GetDeviceImageSubresourceLayoutKHR(VkDevice _device,
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo,
-                                   DRM_FORMAT_MOD_INVALID, NULL, NULL,
-                                   TU_IMAGE_ID_NONE);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_subresource_layout(&image, pInfo->pSubresource, pLayout);
 }
@@ -1764,8 +1540,8 @@ tu_CreateImageView(VkDevice _device,
    VK_FROM_HANDLE(tu_device, device, _device);
    struct tu_image_view *view;
 
-   view = (struct tu_image_view *) vk_object_alloc(
-      &device->vk, pAllocator, sizeof(*view), VK_OBJECT_TYPE_IMAGE_VIEW);
+   view = static_cast<struct tu_image_view *>(vk_object_alloc(
+      &device->vk, pAllocator, sizeof(*view), VK_OBJECT_TYPE_IMAGE_VIEW));
    if (view == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -1816,7 +1592,8 @@ tu_fragment_density_map_sample(const struct tu_image_view *fdm,
    unsigned cpp = fdm->image->layout[0].cpp;
    unsigned pitch = fdm->view.pitch;
 
-   void *pixel = (char *)fdm->image->map + fdm->view.offset + fdm->view.layer_size * layer + cpp * i + pitch * j;
+   void *pixel = static_cast<char *>(fdm->image->map) + fdm->view.offset +
+                 fdm->view.layer_size * layer + cpp * i + pitch * j;
    float density_src[4], density[4];
    util_format_unpack_rgba(fdm->view.format, density_src, pixel, 1);
    pipe_swizzle_4f(density, density_src, fdm->swizzle);
@@ -1831,10 +1608,14 @@ tu_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device,
 {
    VK_FROM_HANDLE(tu_image, image, pInfo->image);
 
-   /* Save the image iova so that when replaying sparse images have a
-    * consistent iova and therefore consistent descriptor contents.
-    */
-   memcpy(pData, &image->iova, sizeof(image->iova));
+   if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT) {
+      /* Save the image iova so that when replaying sparse images have a
+       * consistent iova and therefore consistent descriptor contents.
+       */
+      memcpy(pData, &image->iova, sizeof(image->iova));
+   } else {
+      memset(pData, 0, sizeof(image->iova));
+   }
    return VK_SUCCESS;
 }
 
@@ -1961,7 +1742,7 @@ tu_bind_sparse_image(struct tu_device *device, void *submit,
                   prev_bo_offset = bo ? column_bo_offset : 0;
                   bind_range = 4096;
                } else if (prev_image_offset + bind_range == image_offset &&
-                          (!bo || prev_bo_offset + bind_range == bo_offset)) {
+                          (!bo || prev_bo_offset + bind_range == column_bo_offset)) {
                   bind_range += 4096;
                } else {
                   tu_submit_add_bind(device, submit, &image->vma,
@@ -1981,3 +1762,4 @@ tu_bind_sparse_image(struct tu_device *device, void *submit,
                          prev_bo_offset, bind_range);
    }
 }
+

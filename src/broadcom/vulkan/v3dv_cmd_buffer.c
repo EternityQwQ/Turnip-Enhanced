@@ -26,6 +26,7 @@
 #include "v3dv_cmd_buffer.h"
 #include "v3dv_image.h"
 #include "v3dv_entrypoints.h"
+#include "v3dv_pass.h"
 #include "v3dv_version_dispatch.h"
 #include "vk_format.h"
 #include "util/perf/cpu_trace.h"
@@ -3413,6 +3414,102 @@ handle_barrier(VkPipelineStageFlags2 srcStageMask, VkAccessFlags2 srcAccessMask,
    }
 }
 
+static bool
+is_tlb_color_input_barrier_scope(const VkPipelineStageFlags2 srcStageMask,
+                                 const VkAccessFlags2 srcAccessMask,
+                                 const VkPipelineStageFlags2 dstStageMask,
+                                 const VkAccessFlags2 dstAccessMask)
+{
+   return !(srcStageMask & ~VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT) &&
+          !(srcAccessMask & ~VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT) &&
+          !(dstStageMask & ~VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT) &&
+          !(dstAccessMask & ~VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT);
+}
+
+/* In Vulkan, vkCmdPipelineBarrier inside a render pass is only allowed
+ * for subpass self-dependencies.
+ */
+static bool
+is_tlb_color_input_barrier(struct v3dv_cmd_buffer *cmd_buffer,
+                           const VkDependencyInfo *info)
+{
+   const struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   if (!state->pass || !state->job)
+      return false;
+
+   /* Buffer memory barriers are not allowed inside a render pass instance. */
+   assert(info->bufferMemoryBarrierCount == 0);
+
+   const struct v3dv_subpass *subpass =
+      &state->pass->subpasses[state->subpass_idx];
+   if (!subpass->has_tlb_color_input_self_dependency)
+      return false;
+
+   if (info->memoryBarrierCount == 0 &&
+       info->imageMemoryBarrierCount == 0){
+      return false;
+   }
+
+   /* A memoryBarrier covers all accesses in its source and destination scopes.
+    * Fallback unless the subpass memory barrier safe bit is set,
+    * indicating that the covered attachment access can use TLB path.
+    */
+   if (info->memoryBarrierCount > 0 &&
+       !subpass->is_tlb_color_memory_barrier_safe){
+      return false;
+   }
+
+   for (uint32_t i=0; i< info->memoryBarrierCount; i++) {
+      const VkMemoryBarrier2 *barrier = &info->pMemoryBarriers[i];
+      /* VK_KHR_maintainance8 can extent the access scope with pNext chain.
+       * Fall back for pNext chains.
+       */
+      if (barrier->pNext != NULL)
+         return false;
+
+      if (!is_tlb_color_input_barrier_scope(barrier->srcStageMask,
+                                            barrier->srcAccessMask,
+                                            barrier->dstStageMask,
+                                            barrier->dstAccessMask)){
+         return false;
+      }
+   }
+   const VkDependencyFlags allowed_dependency_flags = VK_DEPENDENCY_BY_REGION_BIT |
+                                                      VK_DEPENDENCY_VIEW_LOCAL_BIT |
+                                                      VK_DEPENDENCY_FEEDBACK_LOOP_BIT_EXT;
+   if (!(info->dependencyFlags & VK_DEPENDENCY_BY_REGION_BIT) ||
+      (info->dependencyFlags & ~allowed_dependency_flags)) {
+      return false;
+   }
+
+   for (uint32_t i = 0; i < info->imageMemoryBarrierCount; i++) {
+      const VkImageMemoryBarrier2 *barrier = &info->pImageMemoryBarriers[i];
+      if (barrier->pNext != NULL)
+         return false;
+
+      if (barrier->srcQueueFamilyIndex != barrier->dstQueueFamilyIndex)
+         return false;
+
+      if (barrier->subresourceRange.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT)
+         return false;
+
+      if (!is_tlb_color_input_barrier_scope(barrier->srcStageMask,
+                                            barrier->srcAccessMask,
+                                            barrier->dstStageMask,
+                                            barrier->dstAccessMask)) {
+         return false;
+      }
+   }
+   /* If a barrier's scope is limited to color-write to input-reads,
+    * it must target an attachment used as both an input and a color
+    * attachment. The self-dependency is framebuffer-local, and the
+    * input read has already been lowered in the compiler to emit a
+    * TLB load from the corresponding RT, so there is no need to
+    * flush current job.
+    */
+   return true;
+}
+
 void
 v3dv_cmd_buffer_emit_pipeline_barrier(struct v3dv_cmd_buffer *cmd_buffer,
                                       const VkDependencyInfo *info)
@@ -3425,6 +3522,13 @@ v3dv_cmd_buffer_emit_pipeline_barrier(struct v3dv_cmd_buffer *cmd_buffer,
 
    uint32_t memoryBarrierCount = info->memoryBarrierCount;
    const VkMemoryBarrier2 *pMemoryBarriers = info->pMemoryBarriers;
+
+   /* We can ignore barriers for color TLB subpass self-dependencies.
+    * In these cases we compiled the shader to emit a TLB read and we
+    * don't need to flush the current job for that.
+    */
+   if (is_tlb_color_input_barrier(cmd_buffer, info))
+      return;
 
    struct v3dv_barrier_state state = { 0 };
    for (uint32_t i = 0; i < imageBarrierCount; i++) {

@@ -411,9 +411,6 @@ GStreamer-H.265-Vulkan@REPFMT_B_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@REPFMT_C_VIDYO_2,Crash
 GStreamer-H.265-Vulkan@RESCHANGE_A_VIDYO_1,Crash
 GStreamer-H.265-Vulkan@RESPHASE_A_SAMSUNG_2,Crash
-GStreamer-H.265-Vulkan@RPS_B_qualcomm_5,Fail
-GStreamer-H.265-Vulkan@RPS_C_ericsson_5,Fail
-GStreamer-H.265-Vulkan@RPS_E_qualcomm_5,Fail
 GStreamer-H.265-Vulkan@SAO_A_RExt_MediaTek_1,Crash
 GStreamer-H.265-Vulkan@SCREFOFF_A_QCOM_1,Crash
 GStreamer-H.265-Vulkan@SIM_A_IDCC_1,Crash

@@ -161,6 +161,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_present_id2 = PVR_USE_WSI_PLATFORM,
       .KHR_present_wait = PVR_USE_WSI_PLATFORM,
       .KHR_present_wait2 = PVR_USE_WSI_PLATFORM,
+      .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
       .KHR_robustness2 = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
@@ -206,12 +207,14 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_external_memory_dma_buf = true,
       .EXT_host_query_reset = true,
       .EXT_image_2d_view_of_3d = true,
+      .EXT_image_sliced_view_of_3d = true,
       .EXT_index_type_uint8 = true,
       .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
       .EXT_map_memory_placed = true,
       .EXT_non_seamless_cube_map = true,
       .EXT_physical_device_drm = true,
+      .EXT_primitive_topology_list_restart = true,
       .EXT_private_data = true,
       .EXT_provoking_vertex = true,
       .EXT_queue_family_foreign = true,
@@ -225,6 +228,7 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_subgroup_size_control = true,
       .EXT_texel_buffer_alignment = true,
       .EXT_tooling_info = true,
+      .EXT_transform_feedback = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_zero_initialize_device_memory = true,
 #ifdef PVR_USE_WSI_PLATFORM
@@ -263,7 +267,7 @@ static void pvr_physical_device_get_supported_features(
       .textureCompressionETC2 = true,
       .textureCompressionASTC_LDR = false,
       .textureCompressionBC = false,
-      .occlusionQueryPrecise = false,
+      .occlusionQueryPrecise = true,
       .pipelineStatisticsQuery = false,
       .vertexPipelineStoresAndAtomics = false,
       .fragmentStoresAndAtomics = true,
@@ -466,6 +470,9 @@ static void pvr_physical_device_get_supported_features(
       .image2DViewOf3D = true,
       .sampler2DViewOf3D = true,
 
+      /* VK_EXT_image_sliced_view_of_3d */
+      .imageSlicedViewOf3D = true,
+
       /* VK_EXT_map_memory_placed */
       .memoryMapPlaced = true,
       .memoryMapRangePlaced = false,
@@ -481,11 +488,17 @@ static void pvr_physical_device_get_supported_features(
       .provokingVertexLast = true,
       .transformFeedbackPreservesProvokingVertex = false,
 
+      /* Vulkan 1.4 / VK_KHR_push_descriptor */
+      .pushDescriptor = true,
+
       /* Vulkan 1.2 / VK_EXT_scalar_block_layout */
       .scalarBlockLayout = true,
 
       /* Vulkan 1.3 / VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
+
+      /* VK_EXT_transform_feedback */
+      .transformFeedback = true,
 
       /* Vulkan 1.2 / VK_KHR_buffer_device_address */
       .bufferDeviceAddress = false,
@@ -540,6 +553,9 @@ static void pvr_physical_device_get_supported_features(
       /* VK_EXT_border_color_swizzle */
       .borderColorSwizzle = true,
       .borderColorSwizzleFromImage = true,
+
+      /* VK_EXT_primitive_topology_list_restart */
+      .primitiveTopologyListRestart = true,
 
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,
@@ -971,6 +987,18 @@ static bool pvr_physical_device_get_properties(
       .maxCustomBorderColorSamplers =
          get_custom_border_color_samplers(&pdevice->dev_info),
 
+      /* EXT_transform_feedback */
+      .maxTransformFeedbackStreams = PVR_XFB_MAX_STREAMS,
+      .maxTransformFeedbackBuffers = PVR_XFB_MAX_BUFFERS,
+      .maxTransformFeedbackBufferSize = UINT32_MAX,
+      .maxTransformFeedbackStreamDataSize = PVR_XFB_MAX_DATA_SIZE,
+      .maxTransformFeedbackBufferDataSize = PVR_XFB_MAX_DATA_SIZE,
+      .maxTransformFeedbackBufferDataStride = PVR_XFB_MAX_DATA_STRIDE,
+      .transformFeedbackQueries = false,
+      .transformFeedbackStreamsLinesTriangles = false,
+      .transformFeedbackRasterizationStreamSelect = false,
+      .transformFeedbackDraw = true,
+
       /* VK_EXT_physical_device_drm */
       .drmHasPrimary = pdevice->has_primary,
       .drmPrimaryMajor = (int64_t) major(pdevice->primary_devid),
@@ -986,6 +1014,9 @@ static bool pvr_physical_device_get_properties(
          VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .independentResolveNone = true,
       .independentResolve = true,
+
+      /* VK_KHR_push_descriptor */
+      .maxPushDescriptors = PVR_MAX_PUSH_DESCRIPTORS,
 
       /* VK_KHR_line_rasterization */
       .lineSubPixelPrecisionBits = line_sub_pixel_precision_bits,

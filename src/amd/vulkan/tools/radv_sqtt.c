@@ -42,14 +42,13 @@ static void
 radv_emit_wait_for_idle(const struct radv_device *device, struct radv_cmd_stream *cs)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   enum rgp_flush_bits sqtt_flush_bits = 0;
+   enum ac_rgp_flush_bits rgp_flush_bits = 0;
    radv_cs_emit_cache_flush(
       device->ws, cs, pdev->info.gfx_level, NULL, 0,
-      (cs->hw_ip == AMD_IP_COMPUTE
-          ? RADV_CMD_FLAG_CS_PARTIAL_FLUSH
-          : (RADV_CMD_FLAG_CS_PARTIAL_FLUSH | RADV_CMD_FLAG_VS_PARTIAL_FLUSH | RADV_CMD_FLAG_PS_PARTIAL_FLUSH)) |
-         RADV_CMD_FLAG_INV_ICACHE | RADV_CMD_FLAG_INV_SCACHE | RADV_CMD_FLAG_INV_VCACHE | RADV_CMD_FLAG_INV_L2,
-      &sqtt_flush_bits, 0);
+      (cs->hw_ip == AMD_IP_COMPUTE ? AC_BARRIER_SYNC_CS
+                                   : (AC_BARRIER_SYNC_CS | AC_BARRIER_SYNC_VS | AC_BARRIER_SYNC_PS)) |
+         AC_BARRIER_INV_ICACHE | AC_BARRIER_INV_SMEM | AC_BARRIER_INV_VMEM | AC_BARRIER_INV_L2,
+      &rgp_flush_bits, AC_PWS_ACQUIRE_POINT_PFP, 0);
 }
 
 static void
@@ -380,21 +379,19 @@ radv_unregister_queue(struct radv_device *device, struct radv_queue *queue)
 static void
 radv_register_queues(struct radv_device *device, struct ac_sqtt *sqtt)
 {
-   if (device->queue_count[RADV_QUEUE_GENERAL] == 1)
-      radv_register_queue(device, &device->queues[RADV_QUEUE_GENERAL][0]);
+   for (uint32_t i = 0; i < device->queue_count; i++) {
+      struct radv_queue *queue = &device->queues[i];
 
-   for (uint32_t i = 0; i < device->queue_count[RADV_QUEUE_COMPUTE]; i++)
-      radv_register_queue(device, &device->queues[RADV_QUEUE_COMPUTE][i]);
+      if (queue->state.qf == RADV_QUEUE_GENERAL || queue->state.qf == RADV_QUEUE_COMPUTE)
+         radv_register_queue(device, queue);
+   }
 }
 
 static void
 radv_unregister_queues(struct radv_device *device, struct ac_sqtt *sqtt)
 {
-   if (device->queue_count[RADV_QUEUE_GENERAL] == 1)
-      radv_unregister_queue(device, &device->queues[RADV_QUEUE_GENERAL][0]);
-
-   for (uint32_t i = 0; i < device->queue_count[RADV_QUEUE_COMPUTE]; i++)
-      radv_unregister_queue(device, &device->queues[RADV_QUEUE_COMPUTE][i]);
+   for (uint32_t i = 0; i < device->queue_count; i++)
+      radv_unregister_queue(device, &device->queues[i]);
 }
 
 bool

@@ -55,13 +55,23 @@ fit_block_for_ofm(struct ethosu_subgraph *subgraph,
 
    return block;
 }
+
 static bool
 try_block_config(struct ethosu_operation *operation, struct ethosu_block ofm_block, struct ethosu_block ifm_block, struct ethosu_shram_layout *layout)
 {
-   int ifm_bytes = ifm_block.width * ifm_block.height * align(ifm_block.depth, 8);
+   int ifm_element_size = 1 << operation->ifm.precision;
+   int ifm_bytes =
+      ifm_block.width * ifm_block.height * align(ifm_block.depth, 8) *
+      ifm_element_size;
    int ifm_banks = align(DIV_ROUND_UP(ifm_bytes, BANK_SIZE_BYTES) * 2, IFM_GRANULE);
-   int lut_bytes = operation->type == ETHOSU_OPERATION_TYPE_ELTWISE ? operation->eltwise.lut_bytes : 0;
+   int lut_bytes = operation->lut.size;
    int lut_banks = MAX2(DIV_ROUND_UP(lut_bytes, 1024), SHRAM_RESERVED_END_BANKS);
+
+   if (operation->type == ETHOSU_OPERATION_TYPE_POOLING &&
+       operation->pooling.type == ETHOSU_POOLING_TYPE_REDUCE_SUM &&
+       operation->ifm.shape.depth != operation->ofm.shape.depth)
+      ifm_banks = MAX2(ifm_banks, IFM_GRANULE * 2);
+
    int lut_start = SHRAM_TOTAL_BANKS - lut_banks;
    int ifm_end = SHRAM_RESERVED_OUTPUT_BANKS + ifm_banks;
    int ifm2_start = ifm_end;
@@ -129,8 +139,14 @@ find_block_config(struct ethosu_subgraph *subgraph, struct ethosu_operation *ope
    float ofm_elements = operation->ofm.shape.width * operation->ofm.shape.height * operation->ofm.shape.depth;
    float ifm_elements = operation->ifm.shape.width * operation->ifm.shape.height * operation->ifm.shape.depth;
    bool is_pooling = operation->type == ETHOSU_OPERATION_TYPE_POOLING;
+   bool is_reduce_sum = is_pooling &&
+                        operation->pooling.type == ETHOSU_POOLING_TYPE_REDUCE_SUM;
+   bool is_depth_reducing_sum = is_reduce_sum &&
+                                operation->ifm.shape.depth != operation->ofm.shape.depth;
    bool is_depthwise = operation->conv.depthwise;
-   bool is_equal_depth = is_pooling || is_depthwise || operation->type == ETHOSU_OPERATION_TYPE_ELTWISE;
+   bool is_equal_depth =
+      (is_pooling && !is_depth_reducing_sum) || is_depthwise ||
+      operation->type == ETHOSU_OPERATION_TYPE_ELTWISE;
    bool is_convolution = operation->type == ETHOSU_OPERATION_TYPE_CONVOLUTION;
    unsigned dilated_kernel_height =
       (operation->kernel.height - 1) * operation->kernel.dilation_y + 1;
@@ -145,8 +161,15 @@ find_block_config(struct ethosu_subgraph *subgraph, struct ethosu_operation *ope
    search_space.width = MIN2(search_space.width, operation->ofm.shape.width);
    search_space.height = MIN2(search_space.height, operation->ofm.shape.height);
    search_space.depth = MIN2(search_space.depth, operation->ofm.shape.depth);
+   if (is_depth_reducing_sum)
+      search_space.width = MIN2(search_space.width,
+                                device->ofm_ublock.width * 2);
 
-   unsigned depth = MAX2(device->ofm_ublock.depth, MIN2(search_space.depth, ARCH_SPLIT_DEPTH));
+   search_space.width = align(search_space.width, device->ofm_ublock.width);
+   search_space.height = align(search_space.height, device->ofm_ublock.height);
+   search_space.depth = align(search_space.depth, device->ofm_ublock.depth);
+   unsigned depth =
+      MAX2(device->ofm_ublock.depth, MIN2(search_space.depth, ARCH_SPLIT_DEPTH));
 
    bool is_part_kernel = false;
    if (is_convolution) {
@@ -162,10 +185,6 @@ find_block_config(struct ethosu_subgraph *subgraph, struct ethosu_operation *ope
    if (depth < operation->ofm.shape.depth) {
       depth = align(depth, ARCH_SPLIT_DEPTH);
    }
-
-   search_space.width = align(search_space.width, device->ofm_ublock.width);
-   search_space.height = align(search_space.height, device->ofm_ublock.height);
-   search_space.depth = align(search_space.depth, device->ofm_ublock.depth);
 
    while (depth <= search_space.depth) {
       bool wont_fit[search_space.height + 1][search_space.width + 1];

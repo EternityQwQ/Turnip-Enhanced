@@ -30,7 +30,7 @@ using android::GraphicBufferMapper;
 using android::OK;
 using android::status_t;
 
-std::optional<std::vector<PlaneLayout>>
+static std::optional<std::vector<PlaneLayout>>
 GetPlaneLayouts(const native_handle_t *buffer)
 {
    std::vector<PlaneLayout> plane_layouts;

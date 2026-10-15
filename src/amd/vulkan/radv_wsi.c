@@ -101,7 +101,7 @@ radv_init_wsi(struct radv_physical_device *pdev)
    if (result != VK_SUCCESS)
       return result;
 
-   pdev->wsi_device.supports_modifiers = pdev->info.gfx_level >= GFX9;
+   pdev->wsi_device.supports_modifiers = true;
    pdev->wsi_device.set_memory_ownership = radv_wsi_set_memory_ownership;
    pdev->wsi_device.get_blit_queue = radv_wsi_get_prime_blit_queue;
 

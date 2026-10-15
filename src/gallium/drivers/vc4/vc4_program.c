@@ -2721,6 +2721,18 @@ vc4_setup_shared_key(struct vc4_context *vc4, struct vc4_key *key,
                 if (!sampler)
                         continue;
 
+                /* Check if MIN_LOD / MAX_LOD is set, as we can't handle them */
+                if (sampler_state->min_mip_filter != PIPE_TEX_MIPFILTER_NONE) {
+                        if (sampler_state->min_lod > 0) {
+                                mesa_logw_once("Setting GL_TEXTURE_MIN_LOD is not supported");
+                        }
+
+                        unsigned last_level = sampler->u.tex.last_level - sampler->u.tex.first_level;
+                        if (sampler_state->max_lod < last_level){
+                                mesa_logw_once("Setting GL_TEXTURE_MAX_LOD is not supported");
+                        }
+                }
+
                 key->tex[i].format = sampler->format;
                 key->tex[i].swizzle[0] = sampler->swizzle_r;
                 key->tex[i].swizzle[1] = sampler->swizzle_g;

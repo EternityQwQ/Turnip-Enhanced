@@ -68,6 +68,8 @@ r600_shader_from_nir(struct r600_context *rctx,
    }
 
    memset(&pipeshader->shader, 0, sizeof(r600_shader));
+   pipeshader->shader.num_images = sh->info.num_images;
+   pipeshader->shader.num_ssbos = sh->info.num_ssbos;
    pipeshader->scratch_space_needed = sh->scratch_size;
 
    if (sh->info.stage == MESA_SHADER_TESS_EVAL || sh->info.stage == MESA_SHADER_VERTEX ||

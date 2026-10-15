@@ -155,6 +155,9 @@ struct radv_graphics_pipeline {
    /* Whether the pipeline uses a VRS attachment. */
    bool uses_vrs_attachment;
 
+   /* Whether depth/stencil states must be ignored because the pipeline has no depth/stencil attachments. */
+   bool ignore_ds_state;
+
    /* For relocation of shaders with RGP. */
    struct radv_sqtt_shaders_reloc *sqtt_shaders_reloc;
 

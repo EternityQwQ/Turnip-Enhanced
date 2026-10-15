@@ -27,11 +27,10 @@
 #include "etnaviv_compiler.h"
 #include "etnaviv_compiler_nir.h"
 #include "etnaviv_debug.h"
-#include "etnaviv_disk_cache.h"
 #include "util/ralloc.h"
 
 struct etna_compiler *
-etna_compiler_create(const char *renderer, const struct etna_core_info *info)
+etna_compiler_create(const struct etna_core_info *info)
 {
    struct etna_compiler *compiler = rzalloc(NULL, struct etna_compiler);
    bool has_sign_floor_ceil = etna_core_has_feature(info, ETNA_FEATURE_HAS_SIGN_FLOOR_CEIL);
@@ -91,15 +90,12 @@ etna_compiler_create(const char *renderer, const struct etna_core_info *info)
       compiler = NULL;
    }
 
-   etna_disk_cache_init(compiler, renderer);
-
    return compiler;
 }
 
 void
 etna_compiler_destroy(const struct etna_compiler *compiler)
 {
-   disk_cache_destroy(compiler->disk_cache);
    ralloc_free((void *)compiler);
 }
 

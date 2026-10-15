@@ -5,4 +5,4 @@ renderer_check = "Mali"
 tests_per_group = 10000
 prefix = "kraid-"
 [deqp.env]
-PAN_USE_KRAID = "cs,vs,internal"
+PAN_USE_KRAID = "all"

@@ -881,6 +881,19 @@ Return an integer (1 or 0) representing the borrow resulting from the
 subtraction of the two unsigned arguments.
               """)
 
+opcode("uadd_with_carry_out", 2, tuint, [1, 1], [tuint, tuint],
+       False, _2src_commutative, """
+   dst.x = src0.x + src1.x;
+   dst.y = util_add_check_overflow({dest_type}, src0.x,  src1.x);
+""", needs_dest_type = True)
+
+opcode("usub_with_borrow_out", 2, tuint, [1, 1], [tuint, tuint],
+       False, "", """
+   dst.x = src0.x - src1.x;
+   dst.y = src0.x < src1.x;
+""")
+
+
 # hadd: (a + b) >> 1 (without overflow)
 # x + y = x - (x & ~y) + (x & ~y) + y - (~x & y) + (~x & y)
 #       =      (x & y) + (x & ~y) +      (x & y) + (~x & y)

@@ -73,19 +73,6 @@ struct fdl_slice {
 struct fdl_explicit_layout {
    uint32_t offset;
    uint32_t pitch;
-
-   /* Override the row-pitch validation alignment for an imported,
-    * single-level linear image.  Zero keeps the normal hardware-layout
-    * requirement.  This does not change the descriptor's minimum mip pitch.
-    */
-   uint32_t pitch_alignment;
-
-   /* Imported images may omit the four-row over-allocation when the caller
-    * guarantees that any mem<->GMEM access which can cross the logical image
-    * edge uses a bounded path.  This is valid only for a single-level,
-    * single-layer, linear, non-UBWC image.
-    */
-   bool skip_last_level_padding;
 };
 
 /**
@@ -111,7 +98,7 @@ struct fdl_image_params {
    bool ubwc;
 
    /**
-    * Force UBWC at every level, disabling all linear fallback.
+    * Force UBWC, even when below the minimum width.
     */
    bool force_ubwc;
 
@@ -155,7 +142,6 @@ struct fdl_layout {
    bool layer_first : 1; /* see above description */
    bool tile_all : 1;
    bool is_mutable : 1;
-   bool has_explicit_pitch : 1;
 
    /* Note that for tiled textures, beyond a certain mipmap level (ie.
     * when width is less than block size) things switch to linear.  In
@@ -203,13 +189,6 @@ fdl_cpp_shift(const struct fdl_layout *layout)
 static inline uint32_t
 fdl_pitch(const struct fdl_layout *layout, unsigned level)
 {
-   /* Explicit layouts provide the authoritative level-0 row pitch.  Keep
-    * pitchalign for the descriptor's minimum derived-mip pitch instead of
-    * silently rounding the imported level-0 value up to that alignment.
-    */
-   if (level == 0 && layout->has_explicit_pitch)
-      return layout->pitch0;
-
    return align(u_minify(layout->pitch0, level), 1 << layout->pitchalign);
 }
 

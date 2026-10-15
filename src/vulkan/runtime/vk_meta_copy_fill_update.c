@@ -300,6 +300,40 @@ copy_img_view_format_for_aspect(const struct vk_meta_copy_image_view *info,
 }
 
 static bool
+copying_ds_with_color(const struct vk_meta_copy_image_view *view_info,
+                      VkImageAspectFlags aspects)
+{
+   if (!(aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)))
+      return false;
+
+   VkImageAspectFlags format_aspects = 0;
+   if (aspects & VK_IMAGE_ASPECT_DEPTH_BIT)
+      format_aspects |= vk_format_aspects(view_info->depth.format);
+   if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT)
+      format_aspects |= vk_format_aspects(view_info->stencil.format);
+
+   switch (format_aspects) {
+   case VK_IMAGE_ASPECT_COLOR_BIT:
+      return true;
+   case VK_IMAGE_ASPECT_DEPTH_BIT:
+      return false;
+   case VK_IMAGE_ASPECT_STENCIL_BIT:
+   case VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT:
+      UNREACHABLE("Copy of stencil component with stencil view not yet supported");
+   default:
+      UNREACHABLE("Invalid formats for ds copy");
+   }
+}
+
+static bool
+copying_ds_with_ds(const struct vk_meta_copy_image_view *view_info,
+                   VkImageAspectFlags aspects)
+{
+   return (aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) &&
+          !copying_ds_with_color(view_info, aspects);
+}
+
+static bool
 depth_stencil_interleaved(const struct vk_meta_copy_image_view *view)
 {
    return view->stencil.format != VK_FORMAT_UNDEFINED &&
@@ -375,10 +409,17 @@ get_gfx_copy_pipeline(
       VkFormat fmt =
          copy_img_view_format_for_aspect(view, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-      render.color_attachment_formats[render.color_attachment_count] = fmt;
-      render.color_attachment_write_masks[render.color_attachment_count] =
-         (VkColorComponentFlags)view->depth.component_mask;
-      render.color_attachment_count++;
+      if (copying_ds_with_color(view, aspects)) {
+         render.color_attachment_formats[render.color_attachment_count] = fmt;
+         render.color_attachment_write_masks[render.color_attachment_count] =
+            (VkColorComponentFlags)view->depth.component_mask;
+         render.color_attachment_count++;
+      } else {
+         ds_info.depthTestEnable = VK_TRUE;
+         ds_info.depthWriteEnable = VK_TRUE;
+         ds_info.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+         render.depth_attachment_format = fmt;
+      }
    }
 
    if (aspects & VK_IMAGE_ASPECT_STENCIL_BIT) {
@@ -389,6 +430,7 @@ get_gfx_copy_pipeline(
           depth_stencil_interleaved(view)) {
          render.color_attachment_write_masks[0] |= view->stencil.component_mask;
       } else {
+         assert(copying_ds_with_color(view, aspects));
          render.color_attachment_formats[render.color_attachment_count] = fmt;
          render.color_attachment_write_masks[render.color_attachment_count] =
             (VkColorComponentFlags)view->stencil.component_mask;
@@ -479,7 +521,7 @@ copy_create_src_image_view(struct vk_command_buffer *cmd,
       },
    };
 
-   if (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+   if (copying_ds_with_color(view_info, aspect)) {
       nir_component_mask_t comp_mask = aspect == VK_IMAGE_ASPECT_STENCIL_BIT
                                           ? view_info->stencil.component_mask
                                           : view_info->depth.component_mask;
@@ -596,7 +638,8 @@ static VkFormat
 copy_img_buf_format_for_aspect(const struct vk_meta_copy_image_view *info,
                                VkImageAspectFlagBits aspect)
 {
-   if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
+   if (copying_ds_with_color(info, aspect) &&
+       aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
       enum pipe_format pfmt = vk_format_to_pipe_format(info->depth.format);
       unsigned num_comps = util_format_get_nr_components(pfmt);
       unsigned depth_comp_bits = 0;
@@ -655,6 +698,26 @@ convert_texel(nir_builder *b, VkFormat src_fmt, VkFormat dst_fmt,
 
    if (src_pfmt == dst_pfmt)
       return texel;
+
+   /*
+    * For depth, the hardware is about to convert from float to the output
+    * format, so to compensate for that we need to do the inverse conversion
+    * (output format to float)
+    */
+   if (vk_format_is_int(src_fmt)) {
+      if (dst_fmt == VK_FORMAT_X8_D24_UNORM_PACK32) {
+         texel = nir_iand_imm(b, texel, (1 << 24) - 1);
+         return nir_format_unorm24_to_float(b, texel);
+      } else if (dst_fmt == VK_FORMAT_D32_SFLOAT) {
+         return texel;
+      } else if (vk_format_is_depth_or_stencil(dst_fmt)) {
+         assert(!vk_format_has_stencil(dst_fmt));
+         assert(vk_format_is_unorm(dst_fmt));
+         assert(texel->num_components == 1);
+         const unsigned bit_size = texel->bit_size;
+         return nir_format_unorm_to_float(b, texel, &bit_size);
+      }
+   }
 
    unsigned src_blksz = util_format_get_blocksize(src_pfmt);
    unsigned dst_blksz = util_format_get_blocksize(dst_pfmt);
@@ -791,23 +854,35 @@ static nir_variable *
 frag_var(nir_builder *b, const struct vk_meta_copy_image_view *view,
          VkImageAspectFlags aspect, uint32_t rt)
 {
-   VkFormat fmt = copy_img_view_format_for_aspect(view, aspect);
-   enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
-   enum glsl_base_type base_type =
-      util_format_is_pure_sint(pfmt)   ? GLSL_TYPE_INT
-      : util_format_is_pure_uint(pfmt) ? GLSL_TYPE_UINT
-                                       : GLSL_TYPE_FLOAT;
-   const struct glsl_type *var_type = glsl_vector_type(base_type, 4);
-   static const char *var_names[] = {
-      "gl_FragData[0]",
-      "gl_FragData[1]",
-   };
+   const struct glsl_type *var_type;
+   const char *var_name;
+   int location;
 
-   assert(rt < ARRAY_SIZE(var_names));
+   if (copying_ds_with_ds(view, aspect)) {
+      assert(aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
+      var_name = "gl_FragDepth";
+      var_type = glsl_vector_type(GLSL_TYPE_FLOAT, 1);
+      location = FRAG_RESULT_DEPTH;
+   } else {
+      VkFormat fmt = copy_img_view_format_for_aspect(view, aspect);
+      enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
+      enum glsl_base_type base_type =
+         util_format_is_pure_sint(pfmt)   ? GLSL_TYPE_INT
+         : util_format_is_pure_uint(pfmt) ? GLSL_TYPE_UINT
+                                          : GLSL_TYPE_FLOAT;
+      var_type = glsl_vector_type(base_type, 4);
+      static const char *var_names[] = {
+         "gl_FragData[0]",
+         "gl_FragData[1]",
+      };
+      assert(rt < ARRAY_SIZE(var_names));
+      var_name = var_names[rt];
+      location = FRAG_RESULT_DATA0 + rt;
+   }
 
    nir_variable *var = nir_variable_create(b->shader, nir_var_shader_out,
-                                           var_type, var_names[rt]);
-   var->data.location = FRAG_RESULT_DATA0 + rt;
+                                           var_type, var_name);
+   var->data.location = location;
 
    return var;
 }
@@ -817,14 +892,16 @@ write_frag(nir_builder *b, const struct vk_meta_copy_image_view *view,
            VkImageAspectFlags aspect, nir_variable *frag_var, nir_def *frag_val)
 {
    nir_component_mask_t comp_mask;
-
-   if (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+   if (copying_ds_with_color(view, aspect)) {
       VkFormat fmt = copy_img_view_format_for_aspect(view, aspect);
 
       comp_mask = aspect == VK_IMAGE_ASPECT_DEPTH_BIT
                      ? view->depth.component_mask
                      : view->stencil.component_mask;
       frag_val = place_ds_texel(b, fmt, comp_mask, frag_val);
+   } else if (copying_ds_with_ds(view, aspect)) {
+      frag_val = nir_trim_vector(b, frag_val, 1);
+      comp_mask = nir_component_mask(1);
    } else {
       comp_mask = nir_component_mask(4);
    }
@@ -847,7 +924,8 @@ write_frag(nir_builder *b, const struct vk_meta_copy_image_view *view,
       }
    }
 
-   frag_val = nir_pad_vector_imm_int(b, frag_val, 0, 4);
+   frag_val = nir_pad_vector_imm_int(b, frag_val, 0,
+                                     glsl_get_components(frag_var->type));
 
    nir_store_var(b, frag_var, frag_val, comp_mask);
 }
@@ -879,6 +957,7 @@ write_img(nir_builder *b, const struct vk_meta_copy_image_view *view,
    nir_def *zero_lod = nir_imm_int(b, 0);
 
    if (aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+      assert(copying_ds_with_color(view, aspect));
       nir_component_mask_t comp_mask = aspect == VK_IMAGE_ASPECT_DEPTH_BIT
                                           ? view->depth.component_mask
                                           : view->stencil.component_mask;
@@ -1294,9 +1373,10 @@ format_is_supported(VkFormat fmt)
    enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
    const struct util_format_description *fdesc = util_format_description(pfmt);
 
-   /* We only support RGB formats in the copy path to keep things simple. */
+   /* We only support RGB or depth formats in the copy path. */
    return fdesc->colorspace == UTIL_FORMAT_COLORSPACE_RGB ||
-          fdesc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB;
+          fdesc->colorspace == UTIL_FORMAT_COLORSPACE_SRGB ||
+          fdesc->colorspace == UTIL_FORMAT_COLORSPACE_ZS;
 }
 
 static struct vk_meta_copy_image_view
@@ -1481,6 +1561,7 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
       .y1 = dst_img_offset->y + copy_extent->height,
    };
    VkRenderingAttachmentInfo vk_atts[2];
+   uint8_t vk_att_idx = 0;
    VkRenderingInfo vk_render = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
       .renderArea = {
@@ -1494,7 +1575,6 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
          },
       },
       .layerCount = depth_or_layer_count,
-      .pColorAttachments = vk_atts,
    };
    VkImageView iview = VK_NULL_HANDLE;
 
@@ -1513,7 +1593,7 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
          return;
       }
 
-      vk_atts[vk_render.colorAttachmentCount] = (VkRenderingAttachmentInfo){
+      vk_atts[vk_att_idx] = (VkRenderingAttachmentInfo){
          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
          .imageView = iview,
          .imageLayout = dst_img_layout,
@@ -1528,11 +1608,18 @@ copy_draw(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
           depth_stencil_interleaved(view_info) &&
           (dst_img_subres->aspectMask !=
            (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
-         vk_atts[vk_render.colorAttachmentCount].loadOp =
+         vk_atts[vk_att_idx].loadOp =
             VK_ATTACHMENT_LOAD_OP_LOAD;
       }
 
-      vk_render.colorAttachmentCount++;
+      if (copying_ds_with_ds(view_info, dst_img_subres->aspectMask)) {
+         assert(aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
+         vk_render.pDepthAttachment = &vk_atts[vk_att_idx];
+      } else {
+         vk_render.pColorAttachments = vk_atts;
+         vk_render.colorAttachmentCount++;
+      }
+      vk_att_idx++;
    }
 
    disp->CmdBeginRendering(vk_command_buffer_to_handle(cmd), &vk_render);

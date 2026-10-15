@@ -126,7 +126,9 @@ def declare_options(android_version):
         B("anv_write_lookup_maps_unconditionally", False,
           "Unconditionally write lookup maps for BLAS update operation",
           c_name="write_lookup_maps_unconditionally"),
-
+        B("anv_disable_xe_engine_cycles", False,
+          "Disable use of DRM_XE_DEVICE_QUERY_ENGINE_CYCLES on Xe",
+          c_name="disable_xe_engine_cycles"),
         # Workaround command emission
         B("anv_barrier_post_untyped_clear_shader", False,
           "Insert pipeline barriers post clearing shader on untyped data",
@@ -176,6 +178,9 @@ def declare_options(android_version):
         I("query_copy_with_shader_threshold", 6, 0, 0x7fffffff,
           "Query threshold count above which query copies are executed with a shader",
           c_name="query_copy_with_shader_threshold"),
+        B("anv_disable_jay", False,
+          "Disable Jay and fall back to the brw compiler",
+          c_name="disable_jay"),
 
         B("anv_enable_alloc_oversubscription", True,
           "Allow the optional alignment of allocation sizes to large page sizes",
@@ -215,6 +220,12 @@ def declare_options(android_version):
         B("intel_force_sampler_prefetch", False,
           "Enable binding table sampler prefteching",
           c_name="sampler_prefetch"),
+        E("intel_code_motion", 0, 0, 2,
+          [EV(0, "compiler default"),
+           EV(1, "nir_opt_licm, hoist out of loops only"),
+           EV(2, "nir_opt_gcm, global code motion")],
+          "Which code motion pass runs in the NIR optimization loop",
+          c_name="code_motion"),
 
         B("force_guc_low_latency", False,
           "Enable low latency GuC strategy.",
@@ -252,6 +263,12 @@ def declare_options(android_version):
            EV(4096,  "4096 clocks")],
           "Force BTD child dispatches if dispatches do not happen naturally for number of clocks equal to the programmed timeout counter",
           c_name="rt_dispatch_timeout"),
+        I("anv_rt_tile_x", 0, 0, 256,
+          "Ray tracing dispatch tile width (0 for automatic)",
+          c_name="rt_tile_x"),
+        I("anv_rt_tile_y", 0, 0, 64,
+          "Ray tracing dispatch tile height (0 for automatic)",
+          c_name="rt_tile_y"),
     ]
 
     feature_options = [

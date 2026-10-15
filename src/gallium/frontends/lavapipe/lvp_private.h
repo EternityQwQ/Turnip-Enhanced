@@ -33,6 +33,7 @@
 
 #include "util/macros.h"
 #include "util/list.h"
+#include "util/u_call_once.h"
 #include "util/u_dynarray.h"
 #include "util/simple_mtx.h"
 #include "util/u_queue.h"
@@ -98,7 +99,7 @@ typedef uint32_t xcb_window_t;
 extern "C" {
 #endif
 
-#define LVP_NUM_QUEUES 1
+#define LVP_NUM_QUEUES 2
 #define MAX_SETS 8
 #define MAX_DESCRIPTORS ((1<<20) - (1<<15)) /* Required by VK_EXT_descriptor_heap */
 #define MAX_PUSH_CONSTANTS_SIZE 256
@@ -163,9 +164,9 @@ struct lvp_physical_device {
 
    struct pipe_loader_device *pld;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    const nir_shader_compiler_options *drv_options[LVP_SHADER_STAGES];
    uint32_t max_images;
-   bool snorm_blend;
 
    struct vk_sync_timeline_type sync_timeline_type;
    const struct vk_sync_type *sync_types[3];
@@ -175,6 +176,8 @@ struct lvp_physical_device {
 
 struct lvp_instance {
    struct vk_instance vk;
+
+   struct list_head link;
 
    struct lvp_drirc drirc;
 
@@ -197,8 +200,6 @@ struct lvp_queue {
    struct u_upload_mgr *uploader;
    struct pipe_fence_handle *last_fence;
    void *state;
-   struct util_dynarray pipeline_destroys;
-   simple_mtx_t lock;
 };
 
 static inline struct lvp_device *
@@ -215,8 +216,10 @@ struct lvp_pipeline_cache {
 struct lvp_device {
    struct vk_device vk;
 
-   struct lvp_queue queue;
+   struct lvp_queue queue[LVP_NUM_QUEUES];
+   uint32_t queue_count;
    struct pipe_screen *pscreen;
+   struct pipe_screen *drv_pscreen;
    void *noop_fs;
    simple_mtx_t bda_lock;
    struct hash_table bda;
@@ -233,6 +236,9 @@ struct lvp_device {
 
    struct vk_meta_device meta;
    struct vk_acceleration_structure_build_args accel_struct_args;
+
+   struct util_dynarray shader_destroys;
+   simple_mtx_t shader_destroys_lock;
 };
 
 static inline const struct lvp_physical_device *
@@ -459,9 +465,7 @@ struct lvp_shader {
    struct lp_sampler_descriptor *embedded_samplers_map;
    struct pipe_resource *embedded_samplers;
    struct lvp_pipeline_nir *pipeline_nir;
-   struct lvp_pipeline_nir *tess_ccw;
    void *shader_cso;
-   void *tess_ccw_cso;
    struct pipe_stream_output_info stream_output;
    struct blob blob; //preserved for GetShaderBinaryDataEXT
    uint32_t push_constant_size;
@@ -542,9 +546,8 @@ struct lvp_pipeline {
    bool disable_multisample;
    bool line_rectangular;
    bool library;
-   bool compiled;
-   bool used;
    bool heaps;
+   util_once_flag compile_once;
 
    struct {
       const char *name;
@@ -590,7 +593,7 @@ struct lvp_exec_graph_internal_data {
 };
 
 void
-lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline, bool locked);
+lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline);
 
 struct lvp_event {
    struct vk_object_base base;
@@ -805,7 +808,10 @@ lvp_image_aspects_to_plane(ASSERTED const struct lvp_image *image,
 }
 
 void
-lvp_pipeline_destroy(struct lvp_device *device, struct lvp_pipeline *pipeline, bool locked);
+lvp_pipeline_destroy(struct lvp_device *device, struct lvp_pipeline *pipeline);
+
+void
+lvp_destroy_shaders(struct lvp_device *device, struct pipe_context *ctx);
 
 void
 queue_thread_noop(void *data, void *gdata, int thread_index);
@@ -821,7 +827,7 @@ void
 lvp_shader_optimize(nir_shader *nir);
 
 void *
-lvp_shader_compile(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir, bool locked);
+lvp_shader_compile(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir);
 
 enum vk_cmd_type
 lvp_nv_dgc_token_to_cmd_type(const VkIndirectCommandsLayoutTokenNV *token);

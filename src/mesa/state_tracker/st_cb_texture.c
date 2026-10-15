@@ -75,9 +75,9 @@
 #include "util/log.h"
 #include "util/u_inlines.h"
 #include "util/u_upload_mgr.h"
-#include "pipe/p_shader_tokens.h"
 #include "util/u_tile.h"
 #include "util/format/u_format.h"
+#include "util/format/u_formats.h"
 #include "util/u_surface.h"
 #include "util/u_sampler.h"
 #include "util/u_math.h"
@@ -1577,10 +1577,10 @@ format_is_swizzled_rgba(enum pipe_format format)
 {
     const struct util_format_description *desc = util_format_description(format);
 
-    if ((desc->swizzle[0] == TGSI_SWIZZLE_X || desc->swizzle[0] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[1] == TGSI_SWIZZLE_Y || desc->swizzle[1] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[2] == TGSI_SWIZZLE_Z || desc->swizzle[2] == PIPE_SWIZZLE_0) &&
-        (desc->swizzle[3] == TGSI_SWIZZLE_W || desc->swizzle[3] == PIPE_SWIZZLE_1))
+    if ((desc->swizzle[0] == PIPE_SWIZZLE_X || desc->swizzle[0] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[1] == PIPE_SWIZZLE_Y || desc->swizzle[1] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[2] == PIPE_SWIZZLE_Z || desc->swizzle[2] == PIPE_SWIZZLE_0) &&
+        (desc->swizzle[3] == PIPE_SWIZZLE_W || desc->swizzle[3] == PIPE_SWIZZLE_1))
        return false;
 
     return true;
@@ -2310,8 +2310,14 @@ st_TexSubImage(struct gl_context *ctx, GLuint dims,
                                    &src_templ.width0, &src_templ.height0,
                                    &src_templ.depth0, &src_templ.array_size);
 
-   /* Check for NPOT texture support. */
-   if (!screen->caps.npot_textures &&
+   /* This only needs level-zero NPOT sampling with clamp-to-edge, which is
+    * required desktop GL 2.0 and GLES2 even without an NPOT extension. */
+   const bool allow_npot_staging =
+      screen->caps.npot_textures ||
+      _mesa_is_gles2(ctx) ||
+      (_mesa_is_desktop_gl(ctx) && ctx->Version >= 20);
+
+   if (!allow_npot_staging &&
        (!util_is_power_of_two_or_zero(src_templ.width0) ||
         !util_is_power_of_two_or_zero(src_templ.height0) ||
         !util_is_power_of_two_or_zero(src_templ.depth0))) {

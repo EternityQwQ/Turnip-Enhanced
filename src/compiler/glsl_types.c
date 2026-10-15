@@ -956,6 +956,37 @@ glsl_sampler_type(enum glsl_sampler_dim dim, bool shadow,
          return &glsl_type_builtin_error;
       }
       break;
+   case GLSL_TYPE_UINT16:
+      if (shadow)
+         return &glsl_type_builtin_error;
+      switch (dim) {
+      case GLSL_SAMPLER_DIM_1D:
+         return (array ? &glsl_type_builtin_u16sampler1DArray : &glsl_type_builtin_u16sampler1D);
+      case GLSL_SAMPLER_DIM_2D:
+         return (array ? &glsl_type_builtin_u16sampler2DArray : &glsl_type_builtin_u16sampler2D);
+      case GLSL_SAMPLER_DIM_3D:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16sampler3D;
+      case GLSL_SAMPLER_DIM_CUBE:
+         return (array ? &glsl_type_builtin_u16samplerCubeArray : &glsl_type_builtin_u16samplerCube);
+      case GLSL_SAMPLER_DIM_RECT:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16sampler2DRect;
+      case GLSL_SAMPLER_DIM_BUF:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16samplerBuffer;
+      case GLSL_SAMPLER_DIM_MS:
+         return (array ? &glsl_type_builtin_u16sampler2DMSArray : &glsl_type_builtin_u16sampler2DMS);
+      case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
+      case GLSL_SAMPLER_DIM_SUBPASS:
+      case GLSL_SAMPLER_DIM_SUBPASS_MS:
+         return &glsl_type_builtin_error;
+      }
+      break;
    case GLSL_TYPE_VOID:
       return shadow ? &glsl_type_builtin_samplerShadow : &glsl_type_builtin_sampler;
    default:
@@ -1192,6 +1223,35 @@ glsl_image_type(enum glsl_sampler_dim dim, bool array, enum glsl_base_type type)
          return &glsl_type_builtin_usubpassInput;
       case GLSL_SAMPLER_DIM_SUBPASS_MS:
          return &glsl_type_builtin_usubpassInputMS;
+      case GLSL_SAMPLER_DIM_EXTERNAL:
+      case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
+         return &glsl_type_builtin_error;
+      }
+      break;
+   case GLSL_TYPE_UINT16:
+      switch (dim) {
+      case GLSL_SAMPLER_DIM_1D:
+         return (array ? &glsl_type_builtin_u16image1DArray : &glsl_type_builtin_u16image1D);
+      case GLSL_SAMPLER_DIM_2D:
+         return (array ? &glsl_type_builtin_u16image2DArray : &glsl_type_builtin_u16image2D);
+      case GLSL_SAMPLER_DIM_3D:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16image3D;
+      case GLSL_SAMPLER_DIM_CUBE:
+         return (array ? &glsl_type_builtin_u16imageCubeArray : &glsl_type_builtin_u16imageCube);
+      case GLSL_SAMPLER_DIM_RECT:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16image2DRect;
+      case GLSL_SAMPLER_DIM_BUF:
+         if (array)
+            return &glsl_type_builtin_error;
+         return &glsl_type_builtin_u16imageBuffer;
+      case GLSL_SAMPLER_DIM_MS:
+         return (array ? &glsl_type_builtin_u16image2DMSArray : &glsl_type_builtin_u16image2DMS);
+      case GLSL_SAMPLER_DIM_SUBPASS:
+      case GLSL_SAMPLER_DIM_SUBPASS_MS:
       case GLSL_SAMPLER_DIM_EXTERNAL:
       case GLSL_SAMPLER_DIM_EXTERNAL_2D_Y2Y:
          return &glsl_type_builtin_error;

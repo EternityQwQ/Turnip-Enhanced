@@ -58,7 +58,6 @@ spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drect_projvec
 spec@arb_texture_rectangle@tex-miplevel-selection gl2:textureproj 2drectshadow,Crash
 spec@arb_transform_feedback_instanced@draw-auto instanced,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_mesa_configless_context@basic,Fail
 spec@ext_base_instance@arb_base_instance-drawarrays_gles3,Fail
 spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
 spec@ext_transform_feedback2@draw-auto,Fail
@@ -172,7 +171,6 @@ spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full 
 spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.1@linestipple@Factor 2x,Fail
 spec@!opengl 1.1@linestipple@Factor 3x,Fail
 spec@!opengl 1.1@linestipple,Fail
@@ -209,9 +207,6 @@ spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,
 spec@!opengl 1.1@polygon-mode-offset,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
-spec@!opengl 2.1@pbo,Fail
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-spec@!opengl 2.1@polygon-stipple-fs,Fail
 spec@!opengl 3.0@gl_vertexid used with glmultidrawarrays,Fail
 spec@!opengl 3.1@primitive-restart-xfb flush,Fail
 spec@!opengl 3.1@primitive-restart-xfb generated,Fail
@@ -312,7 +307,6 @@ dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_fixed_trilinear_f
 dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_fixed_trilinearnon_zero_base_level_fragment,Fail
 dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_float_trilinear_fragment,Fail
 dEQP-VK.glsl.texture_functions.query.texturequerylod.sampler2d_float_trilinearnon_zero_base_level_fragment,Fail
-dEQP-VK.image.host_image_copy.properties.properties,Fail
 
 # VKCTS 1.4.5.3 -> 1.4.6.1 uprev
 dEQP-VK.rasterization.primitives.no_stipple.lines,Fail

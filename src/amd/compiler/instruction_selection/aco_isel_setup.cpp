@@ -614,6 +614,7 @@ init_context(isel_context* ctx, nir_shader* shader)
                case nir_intrinsic_reduce:
                case nir_intrinsic_load_ubo:
                case nir_intrinsic_load_ssbo:
+               case nir_intrinsic_load_constant:
                case nir_intrinsic_load_global_amd:
                   type = intrinsic->def.divergent ? RegType::vgpr : RegType::sgpr;
                   break;

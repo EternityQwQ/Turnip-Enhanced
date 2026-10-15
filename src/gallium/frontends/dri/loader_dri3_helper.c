@@ -51,7 +51,6 @@ struct loader_dri3_blit_context {
    simple_mtx_t mtx;
    struct dri_context *ctx;
    struct dri_screen *cur_screen;
-   const __DRIcoreExtension *core;
 };
 
 /* For simplicity we maintain the cache only for a single screen at a time */
@@ -1500,14 +1499,15 @@ dri3_alloc_render_buffer(struct loader_dri3_drawable *draw, unsigned int fourcc,
 
          free(mod_reply);
       }
-      buffer->image = dri_create_image_with_modifiers(draw->dri_screen_render_gpu,
-                                              width, height, format,
-                                              __DRI_IMAGE_USE_SHARE |
-                                              __DRI_IMAGE_USE_SCANOUT |
-                                              __DRI_IMAGE_USE_BACKBUFFER |
-                                              (draw->is_protected_content ?
-                                               __DRI_IMAGE_USE_PROTECTED : 0),
-                                              modifiers, count, buffer);
+      buffer->image = dri_create_image(draw->dri_screen_render_gpu,
+                                       width, height, format,
+                                       modifiers, count,
+                                       __DRI_IMAGE_USE_SHARE |
+                                       __DRI_IMAGE_USE_SCANOUT |
+                                       __DRI_IMAGE_USE_BACKBUFFER |
+                                       (draw->is_protected_content ?
+                                        __DRI_IMAGE_USE_PROTECTED : 0),
+                                       buffer);
       free(modifiers);
 
       pixmap_buffer = buffer->image;

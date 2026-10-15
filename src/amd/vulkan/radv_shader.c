@@ -306,6 +306,8 @@ radv_optimize_nir_algebraic_late(nir_shader *nir)
       NIR_LOOP_PASS(_, skip, nir, nir_opt_cse);
    }
    _mesa_set_destroy(skip, NULL);
+
+   NIR_PASS(_, nir, nir_opt_uadd_carry, 32 | 64);
 }
 
 void
@@ -528,6 +530,7 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
                .force_ssbo_non_uniform = compiler_info->key.ssbo_non_uniform,
                .lower_terminate_to_discard = compiler_info->key.lower_terminate_to_discard,
                .force_nan_preserve_min_max = compiler_info->key.force_nan_preserve_min_max,
+               .force_exact_glsl_fma = compiler_info->key.force_exact_glsl_fma,
             },
          .emit_debug_break = compiler_info->debug.trap_enabled,
          .debug_info = compiler_info->key.nir_debug_info,
@@ -583,6 +586,9 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
          NIR_PASS(_, nir, nir_opt_copy_prop);
       }
       NIR_PASS(_, nir, nir_opt_deref);
+
+      if (nir->info.stage == MESA_SHADER_FRAGMENT)
+         NIR_PASS(_, nir, vk_nir_lower_input_attachment_loads);
 
       /* Make sure we lower constant initializers on output variables so that
        * nir_remove_dead_variables below sees the corresponding stores
@@ -2044,7 +2050,6 @@ radv_precompute_registers_hw_fs(struct radv_device *device, struct radv_shader *
       regs->ps.spi_shader_pgm_rsrc4_ps =
          S_00B01C_WAVE_LIMIT_GFX12(0x3FF) | S_00B01C_LDS_GROUP_SIZE_GFX12(1) | S_00B01C_INST_PREF_SIZE(inst_pref_size);
 
-      regs->ps.pa_sc_hisz_control = S_028BBC_ROUND(2); /* required minimum value */
       if (info->ps.depth_layout == FRAG_DEPTH_LAYOUT_GREATER)
          regs->ps.pa_sc_hisz_control |= S_028BBC_CONSERVATIVE_Z_EXPORT(V_028BBC_EXPORT_GREATER_THAN_Z);
       else if (info->ps.depth_layout == FRAG_DEPTH_LAYOUT_LESS)
@@ -2264,12 +2269,6 @@ radv_precompute_registers(struct radv_device *device, struct radv_shader *shader
 }
 
 static bool
-radv_mem_ordered(enum amd_gfx_level gfx_level)
-{
-   return gfx_level >= GFX10 && gfx_level < GFX12;
-}
-
-static bool
 radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, struct radv_shader_binary *binary,
                                const struct radv_shader_args *args)
 {
@@ -2282,6 +2281,7 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
       return false;
 #else
       struct ac_rtld_binary rtld_binary = {0};
+      rtld_binary.options.exact_float_mode = !compiler_info->key.use_llvm;
 
       if (!radv_open_rtld_binary(compiler_info->ac->gfx_level, binary, &rtld_binary)) {
          return false;
@@ -2294,8 +2294,10 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
          return false;
       }
 
-      /* Calculate LDS allocation requirements. */
-      config->lds_size = radv_calculate_lds_size(&binary->info, compiler_info->ac->gfx_level);
+      /* Calculate LDS allocation requirements. The ELF's LDS size can be too small for LLVM, but ACO might use LDS for
+       * VGPR spilling. */
+      unsigned lds_size = radv_calculate_lds_size(&binary->info, compiler_info->ac->gfx_level);
+      config->lds_size = MAX2(config->lds_size, lds_size);
 
       ac_rtld_close(&rtld_binary);
 #endif
@@ -2398,7 +2400,7 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
    case MESA_SHADER_TESS_EVAL:
       if (info->is_ngg) {
          if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-            config->rsrc1 |= S_00B228_MEM_ORDERED(radv_mem_ordered(gfx_level));
+            config->rsrc1 |= S_00B228_MEM_ORDERED(config->mem_ordered);
          config->rsrc2 |= S_00B22C_OC_LDS_EN(1) | S_00B22C_EXCP_EN(excp_en);
       } else if (info->tes.as_es) {
          assert(gfx_level <= GFX8);
@@ -2410,7 +2412,7 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
          vgpr_comp_cnt = enable_prim_id ? 3 : 2;
 
          if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-            config->rsrc1 |= S_00B128_MEM_ORDERED(radv_mem_ordered(gfx_level));
+            config->rsrc1 |= S_00B128_MEM_ORDERED(config->mem_ordered);
          config->rsrc2 |= S_00B12C_OC_LDS_EN(1) | S_00B12C_EXCP_EN(excp_en);
       }
       config->rsrc2 |= S_00B22C_SHARED_VGPR_CNT(num_shared_vgpr_blocks);
@@ -2436,14 +2438,14 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
          config->rsrc2 |= S_00B12C_OC_LDS_EN(1) | S_00B12C_EXCP_EN(excp_en);
       }
       if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-         config->rsrc1 |= S_00B428_MEM_ORDERED(radv_mem_ordered(gfx_level));
+         config->rsrc1 |= S_00B428_MEM_ORDERED(config->mem_ordered);
       config->rsrc1 |= S_00B428_WGP_MODE(config->wgp_mode);
       config->rsrc2 |= S_00B42C_SHARED_VGPR_CNT(num_shared_vgpr_blocks);
       break;
    case MESA_SHADER_VERTEX:
       if (info->is_ngg) {
          if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-            config->rsrc1 |= S_00B228_MEM_ORDERED(radv_mem_ordered(gfx_level));
+            config->rsrc1 |= S_00B228_MEM_ORDERED(config->mem_ordered);
       } else if (info->vs.as_ls) {
          assert(gfx_level <= GFX8);
          /* We need at least 2 components for LS.
@@ -2473,25 +2475,25 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
          }
 
          if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-            config->rsrc1 |= S_00B128_MEM_ORDERED(radv_mem_ordered(gfx_level));
+            config->rsrc1 |= S_00B128_MEM_ORDERED(config->mem_ordered);
       }
       config->rsrc2 |= S_00B12C_SHARED_VGPR_CNT(num_shared_vgpr_blocks) | S_00B12C_EXCP_EN(excp_en);
       break;
    case MESA_SHADER_MESH:
       if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-         config->rsrc1 |= S_00B228_MEM_ORDERED(radv_mem_ordered(gfx_level));
+         config->rsrc1 |= S_00B228_MEM_ORDERED(config->mem_ordered);
       config->rsrc2 |= S_00B12C_SHARED_VGPR_CNT(num_shared_vgpr_blocks) | S_00B12C_EXCP_EN(excp_en);
       break;
    case MESA_SHADER_FRAGMENT:
       if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-         config->rsrc1 |= S_00B028_MEM_ORDERED(radv_mem_ordered(gfx_level));
+         config->rsrc1 |= S_00B028_MEM_ORDERED(config->mem_ordered);
       config->rsrc1 |= S_00B028_LOAD_PROVOKING_VTX(info->ps.load_provoking_vtx);
       config->rsrc2 |= S_00B02C_SHARED_VGPR_CNT(num_shared_vgpr_blocks) | S_00B02C_EXCP_EN(excp_en) |
                        S_00B02C_LOAD_COLLISION_WAVEID(info->ps.pops && gfx_level < GFX11);
       break;
    case MESA_SHADER_GEOMETRY:
       if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-         config->rsrc1 |= S_00B228_MEM_ORDERED(radv_mem_ordered(gfx_level));
+         config->rsrc1 |= S_00B228_MEM_ORDERED(config->mem_ordered);
       config->rsrc2 |= S_00B22C_SHARED_VGPR_CNT(num_shared_vgpr_blocks) | S_00B22C_EXCP_EN(excp_en);
       break;
    case MESA_SHADER_RAYGEN:
@@ -2503,7 +2505,7 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
    case MESA_SHADER_COMPUTE:
    case MESA_SHADER_TASK:
       if (gfx_level >= GFX10 && gfx_level <= GFX11_7)
-         config->rsrc1 |= S_00B848_MEM_ORDERED(radv_mem_ordered(gfx_level));
+         config->rsrc1 |= S_00B848_MEM_ORDERED(config->mem_ordered);
       config->rsrc1 |= S_00B848_WGP_MODE(config->wgp_mode);
       config->rsrc2 |= S_00B84C_TGID_X_EN(info->cs.uses_block_id[0]) | S_00B84C_TGID_Y_EN(info->cs.uses_block_id[1]) |
                        S_00B84C_TGID_Z_EN(info->cs.uses_block_id[2]) |
@@ -2635,9 +2637,11 @@ radv_postprocess_binary_config(const struct radv_compiler_info *compiler_info, s
 }
 
 void
-radv_shader_combine_cfg_vs_tcs(const struct radv_shader *vs, const struct radv_shader *tcs, uint32_t *rsrc1_out,
-                               uint32_t *rsrc2_out)
+radv_shader_combine_cfg_vs_tcs(const struct radv_device *device, const struct radv_shader *vs,
+                               const struct radv_shader *tcs, uint32_t *rsrc1_out, uint32_t *rsrc2_out)
 {
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+
    if (rsrc1_out) {
       uint32_t rsrc1 = vs->config.rsrc1;
 
@@ -2647,6 +2651,9 @@ radv_shader_combine_cfg_vs_tcs(const struct radv_shader *vs, const struct radv_s
          rsrc1 = (rsrc1 & C_00B228_SGPRS) | (tcs->config.rsrc1 & ~C_00B228_SGPRS);
       if (G_00B428_LS_VGPR_COMP_CNT(tcs->config.rsrc1) > G_00B428_LS_VGPR_COMP_CNT(rsrc1))
          rsrc1 = (rsrc1 & C_00B428_LS_VGPR_COMP_CNT) | (tcs->config.rsrc1 & ~C_00B428_LS_VGPR_COMP_CNT);
+
+      if (pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX12)
+         rsrc1 |= tcs->config.rsrc1 & ~C_00B428_MEM_ORDERED;
 
       *rsrc1_out = rsrc1;
    }
@@ -2678,6 +2685,9 @@ radv_shader_combine_cfg_vs_gs(const struct radv_device *device, const struct rad
          rsrc1 = (rsrc1 & C_00B228_SGPRS) | (gs->config.rsrc1 & ~C_00B228_SGPRS);
       if (G_00B228_GS_VGPR_COMP_CNT(gs->config.rsrc1) > G_00B228_GS_VGPR_COMP_CNT(rsrc1))
          rsrc1 = (rsrc1 & C_00B228_GS_VGPR_COMP_CNT) | (gs->config.rsrc1 & ~C_00B228_GS_VGPR_COMP_CNT);
+
+      if (pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX12)
+         rsrc1 |= gs->config.rsrc1 & ~C_00B228_MEM_ORDERED;
 
       *rsrc1_out = rsrc1;
    }
@@ -3051,15 +3061,20 @@ radv_parse_binary_debug_info(const struct radv_compiler_info *compiler_info, con
 
       const char *disasm_data;
       size_t disasm_size;
-      if (!ac_rtld_get_section_by_name(&rtld_binary, ".AMDGPU.disasm", &disasm_data, &disasm_size)) {
-         ac_rtld_close(&rtld_binary);
-         return VK_ERROR_UNKNOWN;
+      if (ac_rtld_get_section_by_name(&rtld_binary, ".AMDGPU.disasm", &disasm_data, &disasm_size)) {
+         dbg->disasm_string = malloc(disasm_size + 1);
+         memcpy(dbg->disasm_string, disasm_data, disasm_size);
+         dbg->disasm_string[disasm_size] = 0;
+      }
+
+      const char *stats_data;
+      size_t stats_size;
+      if (ac_rtld_get_section_by_name(&rtld_binary, ".ACO.stats", &stats_data, &stats_size)) {
+         dbg->statistics = malloc(stats_size);
+         memcpy(dbg->statistics, stats_data, stats_size);
       }
 
       dbg->ir_string = bin->llvm_ir_size ? strdup((const char *)(bin->data + bin->elf_size)) : NULL;
-      dbg->disasm_string = malloc(disasm_size + 1);
-      memcpy(dbg->disasm_string, disasm_data, disasm_size);
-      dbg->disasm_string[disasm_size] = 0;
 
       ac_rtld_close(&rtld_binary);
 #endif
@@ -3384,24 +3399,18 @@ radv_dump_nir_shaders(const struct radv_compiler_info *compiler_info, struct nir
 }
 
 static void
-radv_aco_build_shader_binary(void **bin, const struct ac_shader_config *config, const char *llvm_ir_str,
-                             unsigned llvm_ir_size, const char *disasm_str, unsigned disasm_size,
-                             struct amd_stats *statistics, uint32_t exec_size, const uint32_t *code, uint32_t code_dw,
-                             const struct aco_symbol *symbols, unsigned num_symbols,
-                             const struct ac_shader_debug_info *debug_info, unsigned debug_info_count)
+radv_aco_build_shader_binary(void **bin, const aco_callback_params *params)
 {
    struct radv_shader_binary **binary = (struct radv_shader_binary **)bin;
 
-   uint32_t debug_info_size = debug_info_count * sizeof(struct ac_shader_debug_info);
-   uint32_t stats_size = statistics ? sizeof(struct amd_stats) : 0;
+   uint32_t debug_info_size = params->debug_info_count * sizeof(struct ac_shader_debug_info);
+   uint32_t stats_size = params->stats ? sizeof(struct amd_stats) : 0;
 
-   size_t size = llvm_ir_size;
-
+   size_t size = params->ir_size;
    size += debug_info_size;
-   size += disasm_size;
+   size += params->disasm_size;
    size += stats_size;
-
-   size += code_dw * sizeof(uint32_t) + sizeof(struct radv_shader_binary_legacy);
+   size += params->code_dw * sizeof(uint32_t) + sizeof(struct radv_shader_binary_legacy);
 
    /* We need to calloc to prevent uninitialized data because this will be used
     * directly for the disk cache. Uninitialized data can appear because of
@@ -3410,31 +3419,51 @@ radv_aco_build_shader_binary(void **bin, const struct ac_shader_config *config, 
    struct radv_shader_binary_legacy *legacy_binary = (struct radv_shader_binary_legacy *)calloc(size, 1);
    legacy_binary->base.type = RADV_BINARY_TYPE_LEGACY;
    legacy_binary->base.total_size = size;
-   legacy_binary->base.config = *config;
+   legacy_binary->base.config = params->config;
    legacy_binary->stats_size = stats_size;
-   legacy_binary->exec_size = exec_size;
-   legacy_binary->code_size = code_dw * sizeof(uint32_t);
-   legacy_binary->ir_size = llvm_ir_size;
-   legacy_binary->disasm_size = disasm_size;
+   legacy_binary->exec_size = params->exec_size;
+   legacy_binary->code_size = params->code_dw * sizeof(uint32_t);
+   legacy_binary->ir_size = params->ir_size;
+   legacy_binary->disasm_size = params->disasm_size;
    legacy_binary->debug_info_size = debug_info_size;
 
    struct radv_shader_binary_layout layout = radv_shader_binary_get_layout(legacy_binary);
 
    if (stats_size)
-      amd_stats_serialize(layout.stats, statistics);
+      amd_stats_serialize(layout.stats, params->stats);
 
-   memcpy(layout.code, code, code_dw * sizeof(uint32_t));
+   memcpy(layout.code, params->code, params->code_dw * sizeof(uint32_t));
 
-   if (llvm_ir_size)
-      memcpy(layout.ir, llvm_ir_str, llvm_ir_size);
+   if (params->ir_size)
+      memcpy(layout.ir, params->ir_str, params->ir_size);
 
-   if (disasm_size)
-      memcpy(layout.disasm, disasm_str, disasm_size);
+   if (params->disasm_size)
+      memcpy(layout.disasm, params->disasm_str, params->disasm_size);
 
    if (debug_info_size)
-      memcpy(layout.debug_info, debug_info, debug_info_size);
+      memcpy(layout.debug_info, params->debug_info, debug_info_size);
 
    *binary = (struct radv_shader_binary *)legacy_binary;
+}
+
+struct build_binary_elf_args {
+   const struct ac_compiler_info *compiler_info;
+   struct radv_shader_binary_rtld *binary;
+};
+
+static void
+radv_aco_build_shader_binary_elf(void **bin, const aco_callback_params *params)
+{
+   struct build_binary_elf_args *args = (struct build_binary_elf_args *)bin;
+
+   size_t size = aco_create_elf(args->compiler_info, params, sizeof(struct radv_shader_binary_rtld), params->ir_size,
+                                (void **)&args->binary);
+
+   args->binary->base.type = RADV_BINARY_TYPE_RTLD;
+   args->binary->base.total_size = sizeof(struct radv_shader_binary_rtld) + size + params->ir_size;
+   args->binary->elf_size = size;
+   args->binary->llvm_ir_size = params->ir_size;
+   memcpy(args->binary->data + args->binary->elf_size, params->ir_str, params->ir_size);
 }
 
 static void
@@ -3522,8 +3551,17 @@ radv_shader_nir_to_asm(const struct radv_compiler_info *compiler_info, struct ra
       struct aco_compiler_options ac_opts;
       radv_aco_fill_compiler_options(&ac_opts, compiler_info, &pl_stage->key, gfx_state, wgp_mode, dump_shader);
       radv_aco_convert_shader_info(&ac_info, info, args, compiler_info);
-      aco_compile_shader(&ac_opts, &ac_info, shader_count, shaders, &args->ac, &radv_aco_build_shader_binary,
-                         (void **)&binary);
+
+      if (compiler_info->key.use_elf) {
+         struct build_binary_elf_args elf;
+         elf.compiler_info = compiler_info->ac;
+         aco_compile_shader(&ac_opts, &ac_info, shader_count, shaders, &args->ac, &radv_aco_build_shader_binary_elf,
+                            (void **)&elf);
+         binary = &elf.binary->base;
+      } else {
+         aco_compile_shader(&ac_opts, &ac_info, shader_count, shaders, &args->ac, &radv_aco_build_shader_binary,
+                            (void **)&binary);
+      }
    }
 
    binary->info = *info;
@@ -3610,24 +3648,23 @@ radv_create_trap_handler_shader(struct radv_device *device)
 }
 
 static void
-radv_aco_build_shader_part(void **bin, uint32_t num_sgprs, uint32_t num_vgprs, uint32_t exec_size, const uint32_t *code,
-                           uint32_t code_size, const char *disasm_str, uint32_t disasm_size)
+radv_aco_build_shader_part(void **bin, const aco_callback_params *params)
 {
    struct radv_shader_part_binary **binary = (struct radv_shader_part_binary **)bin;
-   size_t size = code_size * sizeof(uint32_t) + sizeof(struct radv_shader_part_binary);
+   size_t size = params->code_dw * sizeof(uint32_t) + sizeof(struct radv_shader_part_binary);
 
-   size += disasm_size;
+   size += params->disasm_size;
    struct radv_shader_part_binary *part_binary = (struct radv_shader_part_binary *)calloc(size, 1);
 
-   part_binary->num_sgprs = num_sgprs;
-   part_binary->num_vgprs = num_vgprs;
+   part_binary->num_sgprs = params->config.num_sgprs;
+   part_binary->num_vgprs = params->config.num_vgprs;
    part_binary->total_size = size;
-   part_binary->code_size = code_size * sizeof(uint32_t);
-   part_binary->exec_size = exec_size;
-   memcpy(part_binary->data, code, part_binary->code_size);
-   if (disasm_size) {
-      memcpy((char *)part_binary->data + part_binary->code_size, disasm_str, disasm_size);
-      part_binary->disasm_size = disasm_size;
+   part_binary->code_size = params->code_dw * sizeof(uint32_t);
+   part_binary->exec_size = params->exec_size;
+   memcpy(part_binary->data, params->code, part_binary->code_size);
+   if (params->disasm_size) {
+      memcpy((char *)part_binary->data + part_binary->code_size, params->disasm_str, params->disasm_size);
+      part_binary->disasm_size = params->disasm_size;
    }
 
    *binary = part_binary;

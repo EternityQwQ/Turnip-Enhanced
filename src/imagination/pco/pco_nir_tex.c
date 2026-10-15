@@ -898,6 +898,7 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
    b->cursor = nir_before_instr(&intr->instr);
 
+   bool ia = false;
    nir_def *lod = NULL;
    switch (intr->intrinsic) {
    case nir_intrinsic_image_deref_load:
@@ -914,6 +915,13 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
    case nir_intrinsic_image_deref_atomic:
    case nir_intrinsic_image_deref_atomic_swap:
+      lod = nir_imm_int(b, 0);
+      break;
+
+   case nir_intrinsic_image_deref_input_attachment_load:
+   case nir_intrinsic_image_deref_depth_input_attachment_load:
+   case nir_intrinsic_image_deref_stencil_input_attachment_load:
+      ia = true;
       lod = nir_imm_int(b, 0);
       break;
 
@@ -970,13 +978,36 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
       nir_def *image_size =
          nir_trim_vector(b, size_comps, intr->def.num_components);
+
+      if (data->common.image_sliced_view_of_3d &&
+          image_dim == GLSL_SAMPLER_DIM_3D) {
+         nir_def *tex_meta = nir_load_tex_meta_pco(b,
+                                                   PCO_IMAGE_META_COUNT,
+                                                   elem,
+                                                   .desc_set = desc_set,
+                                                   .binding = binding);
+
+         nir_def *z_slice_pck =
+            nir_channel(b, tex_meta, PCO_IMAGE_META_Z_SLICE);
+         nir_def *z_count =
+            nir_ubitfield_extract_imm(b,
+                                      z_slice_pck,
+                                      PVR_SLICED_VIEW_COUNT_OFFSET,
+                                      PVR_SLICED_VIEW_COUNT_LENGTH);
+         image_size = nir_vector_insert_imm(b, image_size, z_count, 2);
+      }
+
       nir_def_rewrite_uses(&intr->def, image_size);
       nir_instr_remove(&intr->instr);
       return true;
    }
 
+   bool is_load = intr->intrinsic == nir_intrinsic_image_deref_load ||
+      intr->intrinsic == nir_intrinsic_image_deref_input_attachment_load ||
+      intr->intrinsic == nir_intrinsic_image_deref_depth_input_attachment_load ||
+      intr->intrinsic == nir_intrinsic_image_deref_stencil_input_attachment_load;
    nir_alu_type type = nir_type_invalid;
-   if (intr->intrinsic == nir_intrinsic_image_deref_load)
+   if (is_load)
       type = nir_intrinsic_dest_type(intr);
    else if (intr->intrinsic == nir_intrinsic_image_deref_store)
       type = nir_intrinsic_src_type(intr);
@@ -996,6 +1027,26 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
       PCO_DEBUG(INT_SMP)
          ? PVR_HAS_FEATURE(dev_info, tpu_extended_integer_lookup)
          : false;
+
+    if (data->common.image_sliced_view_of_3d &&
+              image_dim == GLSL_SAMPLER_DIM_3D) {
+      nir_def *tex_meta = nir_load_tex_meta_pco(b,
+                                                PCO_IMAGE_META_COUNT,
+                                                elem,
+                                                .desc_set = desc_set,
+                                                .binding = binding);
+
+      nir_def *z_slice_pck = nir_channel(b, tex_meta, PCO_IMAGE_META_Z_SLICE);
+      nir_def *z_offset =
+         nir_ubitfield_extract_imm(b,
+               z_slice_pck,
+               PVR_SLICED_VIEW_OFFSET_OFFSET,
+               PVR_SLICED_VIEW_OFFSET_LENGTH);
+
+      nir_def *z = nir_channel(b, coords, 2);
+      z = nir_iadd(b, z, z_offset);
+      coords = nir_vector_insert_imm(b, coords, z, 2);
+   }
 
    if (write_data) {
       assert(intr->num_components == 4);
@@ -1130,9 +1181,6 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
             nir_bcsel(b, pck_split, write_data_split, write_data_unsplit));
       }
    }
-
-   bool ia = image_dim == GLSL_SAMPLER_DIM_SUBPASS ||
-             image_dim == GLSL_SAMPLER_DIM_SUBPASS_MS;
 
    if (ia) {
       assert(!is_array);
@@ -1444,9 +1492,7 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
       .lod_replace = lod,
 
-      .sample_components = intr->intrinsic == nir_intrinsic_image_deref_load
-                              ? intr->def.num_components
-                              : 0,
+      .sample_components = is_load ? intr->def.num_components : 0,
       .int_mode = hw_int_support,
    };
 
@@ -1490,7 +1536,7 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
    nir_intrinsic_set_access(smp, nir_intrinsic_access(intr));
 
-   if (intr->intrinsic == nir_intrinsic_image_deref_load) {
+   if (is_load) {
       nir_def_rewrite_uses(&intr->def, &smp->def);
       nir_instr_remove(&intr->instr);
       return true;

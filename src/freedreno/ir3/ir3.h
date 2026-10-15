@@ -201,6 +201,9 @@ typedef enum ir3_register_flags {
    IR3_REG_UNIFORM = BIT(24),
 } ir3_register_flags;
 
+#define IR3_REG_SRC_MODS (IR3_REG_FNEG | IR3_REG_FABS | IR3_REG_SNEG | \
+                          IR3_REG_SABS | IR3_REG_BNOT)
+
 struct ir3_register {
    BITMASK_ENUM(ir3_register_flags) flags;
 
@@ -992,6 +995,10 @@ __ssa_srcp_n(struct ir3_instruction *instr, unsigned n)
    list_for_each_entry_safe (struct ir3_block, __block, __list, node)
 #define foreach_block_rev(__block, __list)                                     \
    list_for_each_entry_rev (struct ir3_block, __block, __list, node)
+#define foreach_block_from(__block, __list, __start)                           \
+   list_for_each_entry_from (struct ir3_block, __block, __start, __list, node)
+#define foreach_main_block(__block, __ir)                                      \
+   foreach_block_from (__block, &__ir->block_list, ir3_after_preamble(__ir))
 
 /* iterators for arrays: */
 #define foreach_array(__array, __list)                                         \
@@ -1101,6 +1108,8 @@ void ir3_instr_add_dep(struct ir3_instruction *instr,
                        struct ir3_instruction *dep);
 const char *ir3_instr_name(struct ir3_instruction *instr);
 void ir3_instr_remove(struct ir3_instruction *instr);
+struct ir3_instruction *ir3_instr_prev(struct ir3_instruction *instr);
+struct ir3_instruction *ir3_instr_next(struct ir3_instruction *instr);
 
 void ir3_instr_create_rpt(struct ir3_instruction **instrs, unsigned n);
 bool ir3_instr_is_rpt(const struct ir3_instruction *instr);
@@ -1389,6 +1398,12 @@ is_alu(struct ir3_instruction *instr)
 }
 
 static inline bool
+is_mov(struct ir3_instruction *instr)
+{
+   return opc_cat(instr->opc) == 1;
+}
+
+static inline bool
 is_sfu(struct ir3_instruction *instr)
 {
    return (opc_cat(instr->opc) == 4) || instr->opc == OPC_GETFIBERID;
@@ -1520,6 +1535,7 @@ is_bool(struct ir3_instruction *instr)
    case OPC_CMPS_F:
    case OPC_CMPS_S:
    case OPC_CMPS_U:
+   case OPC_GETBIT_B:
       return true;
    default:
       return false;

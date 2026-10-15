@@ -20,16 +20,22 @@
 #include "util/u_memory.h"
 #include "util/u_framebuffer.h"
 
-#define R600_NUM_ATOMS 57
+#define R600_NUM_ATOMS 62
+
+#define R600_MAX_PS_RESOURCES 176
+#define R600_MAX_VS_RESOURCES 160
 
 #define R600_MAX_IMAGES 8
+#define R600_MAX_SSBOS 12 /* CB0 -> CB11 */
+#define R600_MAX_USABLE_SSBOS (R600_MAX_SSBOS - 1)
+
 /*
  * ranges reserved for images on evergreen
  * first set for the immediate buffers,
  * second for the actual resources for RESQ.
  */
-#define R600_IMAGE_IMMED_RESOURCE_OFFSET 160
-#define R600_IMAGE_REAL_RESOURCE_OFFSET 168
+#define R600_IMAGE_IMMED_RESOURCE_OFFSET (R600_MAX_VS_RESOURCES - 2 * R600_MAX_SSBOS)
+#define R600_IMAGE_REAL_RESOURCE_OFFSET (R600_MAX_VS_RESOURCES - 1 * R600_MAX_SSBOS)
 
 /* read caches */
 #define R600_CONTEXT_INV_VERTEX_CACHE		(R600_CONTEXT_PRIVATE_FLAG << 0)
@@ -389,7 +395,6 @@ struct r600_sampler_states {
 	uint32_t			enabled_mask;
 	uint32_t			dirty_mask;
 	uint32_t			has_bordercolor_mask; /* which states contain the border color */
-	bool				shared_state;
 };
 
 struct r600_textures_info {
@@ -477,7 +482,8 @@ struct r600_image_state {
 	uint32_t			compressed_colortex_mask;
 	uint32_t			incomplete_mask;
 	bool				dirty_buffer_constants;
-	struct r600_image_view views[R600_MAX_IMAGES];
+	struct r600_image_view views[R600_MAX_SSBOS];
+	unsigned			last_offset;
 };
 
 /* Used to spill shader temps */
@@ -570,9 +576,9 @@ struct r600_context {
 	struct r600_vgt_state		vgt_state;
 	struct r600_atomic_buffer_state atomic_buffer_state;
 	/* only have images on fragment shader */
-	struct r600_image_state         fragment_images;
+	struct r600_image_state         fragment_images[2];
 	struct r600_image_state         compute_images;
-	struct r600_image_state         fragment_buffers;
+	struct r600_image_state         fragment_buffers[MESA_SHADER_FRAGMENT + 1];
 	struct r600_image_state         compute_buffers;
 	/* Shaders and shader resources. */
 	struct r600_cso_state		vertex_fetch_shader;
@@ -648,12 +654,25 @@ struct r600_context {
 	struct pipe_resource *append_fence;
 	uint32_t append_fence_id;
 	bool cayman_dealloc_state;
+	bool sampler_vs_as_ls_offset18_state;
 
 	/* Debug */
 #ifndef NDEBUG
 	unsigned cdw_saved;
 #endif
 };
+
+static inline bool r600_check_image_shader_supported(const enum mesa_shader_stage shader)
+{
+	return shader == MESA_SHADER_VERTEX ||
+		shader == MESA_SHADER_FRAGMENT ||
+		shader == MESA_SHADER_COMPUTE;
+}
+
+static inline bool r600_check_buffer_shader_supported(const enum mesa_shader_stage shader)
+{
+	return shader <= MESA_SHADER_COMPUTE;
+}
 
 static inline void r600_emit_command_buffer(struct radeon_cmdbuf *cs,
 					    struct r600_command_buffer *cb)

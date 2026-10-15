@@ -26,6 +26,7 @@
 
 #include "util/bitscan.h"
 #include "util/half_float.h"
+#include "util/u_endian.h"
 #include "nir_control_flow.h"
 
 #ifdef __cplusplus
@@ -797,6 +798,24 @@ nir_swizzle(nir_builder *build, nir_def *src, const unsigned *swiz,
    return nir_mov_alu(build, alu_src, num_components);
 }
 
+/**
+ * Convert 64-bit values split into pairs of 32-bit components between the
+ * low-half-first order of nir_unpack_64_2x32() and memory order, which puts
+ * the high half first on big-endian hosts. Lowered 64-bit IO uses memory
+ * order.
+ */
+static inline nir_def *
+nir_64_2x32_memory_order(nir_builder *build, nir_def *src)
+{
+   static const unsigned swap[] = { 1, 0, 3, 2 };
+
+   assert(src->num_components == 2 || src->num_components == 4);
+   if (UTIL_ARCH_LITTLE_ENDIAN)
+      return src;
+
+   return nir_swizzle(build, src, swap, src->num_components);
+}
+
 /* Selects the right fdot given the number of components in each source. */
 static inline nir_def *
 nir_fdot(nir_builder *build, nir_def *src0, nir_def *src1)
@@ -1123,6 +1142,18 @@ static inline nir_def *
 nir_umin_imm(nir_builder *build, nir_def *x, uint64_t y)
 {
    return nir_umin(build, x, nir_imm_intN_t(build, y, x->bit_size));
+}
+
+static inline nir_def *
+nir_fmax_imm(nir_builder *build, nir_def *x, double y)
+{
+   return nir_fmax(build, x, nir_imm_floatN_t(build, y, x->bit_size));
+}
+
+static inline nir_def *
+nir_fmin_imm(nir_builder *build, nir_def *x, double y)
+{
+   return nir_fmin(build, x, nir_imm_floatN_t(build, y, x->bit_size));
 }
 
 static inline nir_def *

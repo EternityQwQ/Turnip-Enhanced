@@ -75,7 +75,7 @@ constexpr bool
 fence_before(uint32_t a, uint32_t b)
 {
    /* Essentially a < b, but handles wrapped values. */
-   return (int32_t) (a - b) < 0;
+   return static_cast<int32_t>(a - b) < 0;
 }
 
 constexpr const char *
@@ -127,13 +127,13 @@ struct PACKED tu_autotune::config_t {
    {
       /* Note: Always keep in sync with rp_history to prevent UB. */
       if (algo == algorithm::BANDWIDTH) {
-         metric_flags |= (uint8_t) metric_flag::SAMPLES;
+         metric_flags |= static_cast<uint8_t>(metric_flag::SAMPLES);
       } else if (algo == algorithm::PROFILED || algo == algorithm::PROFILED_IMM) {
-         metric_flags |= (uint8_t) metric_flag::TS;
+         metric_flags |= static_cast<uint8_t>(metric_flag::TS);
       }
 
-      if (mod_flags & (uint8_t) mod_flag::PREEMPT_OPTIMIZE) {
-         metric_flags |= (uint8_t) metric_flag::TS | (uint8_t) metric_flag::TS_TILE;
+      if (mod_flags & static_cast<uint8_t>(mod_flag::PREEMPT_OPTIMIZE)) {
+         metric_flags |= static_cast<uint8_t>(metric_flag::TS) | static_cast<uint8_t>(metric_flag::TS_TILE);
       }
    }
 
@@ -152,12 +152,12 @@ struct PACKED tu_autotune::config_t {
 
    constexpr bool test(mod_flag f) const
    {
-      return mod_flags & (uint32_t) f;
+      return mod_flags & static_cast<uint32_t>(f);
    }
 
    constexpr bool test(metric_flag f) const
    {
-      return metric_flags & (uint32_t) f;
+      return metric_flags & static_cast<uint32_t>(f);
    }
 
    constexpr bool set_algo(algorithm a)
@@ -172,20 +172,20 @@ struct PACKED tu_autotune::config_t {
 
    constexpr bool disable(mod_flag f)
    {
-      if (!(mod_flags & (uint8_t) f))
+      if (!(mod_flags & static_cast<uint8_t>(f)))
          return false;
 
-      mod_flags &= ~(uint8_t) f;
+      mod_flags &= ~static_cast<uint8_t>(f);
       update_metric_flags();
       return true;
    }
 
    constexpr bool enable(mod_flag f)
    {
-      if (mod_flags & (uint8_t) f)
+      if (mod_flags & static_cast<uint8_t>(f))
          return false;
 
-      mod_flags |= (uint8_t) f;
+      mod_flags |= static_cast<uint8_t>(f);
       update_metric_flags();
       return true;
    }
@@ -196,11 +196,11 @@ struct PACKED tu_autotune::config_t {
    if (algo == algorithm::algo_name)                                                                                   \
       str += #algo_name;
 #define MODF_STR(flag)                                                                                                 \
-   if (mod_flags & (uint8_t) mod_flag::flag) {                                                                         \
+   if (mod_flags & static_cast<uint8_t>(mod_flag::flag)) {                                                             \
       str += #flag " ";                                                                                                \
    }
 #define METRICF_STR(flag)                                                                                              \
-   if (metric_flags & (uint8_t) metric_flag::flag) {                                                                   \
+   if (metric_flags & static_cast<uint8_t>(metric_flag::flag)) {                                                       \
       str += #flag " ";                                                                                                \
    }
 
@@ -298,7 +298,7 @@ tu_autotune::get_env_config()
          }
 
          if (TU_DEBUG(STARTUP))
-            mesa_logi("TU_AUTOTUNE_ALGO=%u (%s)", (uint8_t) algo, algo_strv.data());
+            mesa_logi("TU_AUTOTUNE_ALGO=%u (%s)", static_cast<uint8_t>(algo), algo_strv.data());
       }
 
       /* Parse the flags from the environment variable. */
@@ -306,9 +306,9 @@ tu_autotune::get_env_config()
       uint32_t mod_flags = 0;
       if (flags_env_str) {
          static const struct debug_control tu_at_flags_control[] = {
-            { "big_gmem", (uint32_t) mod_flag::BIG_GMEM },
-            { "tune_small", (uint32_t) mod_flag::TUNE_SMALL },
-            { "preempt_optimize", (uint32_t) mod_flag::PREEMPT_OPTIMIZE },
+            { "big_gmem", static_cast<uint32_t>(mod_flag::BIG_GMEM) },
+            { "tune_small", static_cast<uint32_t>(mod_flag::TUNE_SMALL) },
+            { "preempt_optimize", static_cast<uint32_t>(mod_flag::PREEMPT_OPTIMIZE) },
             { NULL, 0 }
          };
 
@@ -322,8 +322,8 @@ tu_autotune::get_env_config()
          }
       }
 
-      assert((uint8_t) mod_flags == mod_flags);
-      at_config = config_t(algo, (uint8_t) mod_flags);
+      assert(static_cast<uint8_t>(mod_flags) == mod_flags);
+      at_config = config_t(algo, static_cast<uint8_t>(mod_flags));
    });
 
    if (TU_DEBUG(STARTUP))
@@ -335,10 +335,11 @@ tu_autotune::get_env_config()
 uint32_t
 tu_autotune::get_supported_mod_flags(tu_device *device) const
 {
-   uint32_t supported_mod_flags = (uint32_t) mod_flag::BIG_GMEM | (uint32_t) mod_flag::TUNE_SMALL;
+   uint32_t supported_mod_flags =
+      static_cast<uint32_t>(mod_flag::BIG_GMEM) | static_cast<uint32_t>(mod_flag::TUNE_SMALL);
    if (device->physical_device->info->props.max_draw_states > TU_DRAW_STATE_AT_WRITE_RP_HASH &&
        device->physical_device->is_perf_cntr_selectable) {
-      supported_mod_flags |= (uint32_t) mod_flag::PREEMPT_OPTIMIZE;
+      supported_mod_flags |= static_cast<uint32_t>(mod_flag::PREEMPT_OPTIMIZE);
    }
    return supported_mod_flags;
 }
@@ -560,14 +561,14 @@ struct tu_autotune::rp_entry {
          return;
       }
 
-      map = (uint8_t *) tu_suballoc_bo_map(&bo);
+      map = static_cast<uint8_t *>(tu_suballoc_bo_map(&bo));
       memset(map, 0, total_size);
    }
 
    rp_gpu_data &get_gpu_data()
    {
       assert(map);
-      return *(rp_gpu_data *) map;
+      return *reinterpret_cast<rp_gpu_data *>(map);
    }
 
    tile_gpu_data &get_tile_gpu_data(uint32_t tile_index)
@@ -575,7 +576,7 @@ struct tu_autotune::rp_entry {
       assert(map);
       assert(tile_index < tile_count);
       uint64_t offset = tile_gpu_data::offset(tile_index);
-      return *(tile_gpu_data *) (map + offset);
+      return *reinterpret_cast<tile_gpu_data *>(map + offset);
    }
 
    /** Samples-Passed Metric **/
@@ -747,7 +748,7 @@ tu_autotune::rp_batch_preempt_latency::rp_batch_preempt_latency(struct tu_device
       }
    }
 
-   map = (uint8_t *) tu_suballoc_bo_map(&bo);
+   map = static_cast<uint8_t *>(tu_suballoc_bo_map(&bo));
    memset(map, 0, sizeof(rp_batch_preempt_gpu_data));
 }
 
@@ -764,7 +765,7 @@ tu_autotune::rp_batch_preempt_gpu_data
 tu_autotune::rp_batch_preempt_latency::get_gpu_data()
 {
    assert(allocated);
-   return *(rp_batch_preempt_gpu_data *) map;
+   return *reinterpret_cast<rp_batch_preempt_gpu_data *>(map);
 }
 
 tu_autotune::rp_entry_batch::rp_entry_batch(struct tu_device *device, bool track_preempt_latency)
@@ -1013,53 +1014,9 @@ struct tu_autotune::rp_history {
    /** Bandwidth Estimation Algorithm **/
    struct bandwidth_algo {
     private:
-      static constexpr uint32_t GMEM_FIXED_COST_NUMERATOR = 11;
-      static constexpr uint32_t COST_DENOMINATOR = 10;
-
       exponential_average<uint32_t> mean_samples_passed;
 
     public:
-      static uint64_t get_pass_pixel_count(const struct tu_cmd_state *cmd_state,
-                                           const struct tu_framebuffer *framebuffer)
-      {
-         uint64_t pass_pixel_count = 0;
-         if (cmd_state->per_layer_render_area) {
-            for (unsigned i = 0; i < cmd_state->pass->num_views; i++) {
-               const VkExtent2D &extent = cmd_state->render_areas[i].extent;
-               pass_pixel_count += (uint64_t) extent.width * extent.height;
-            }
-         } else {
-            const VkExtent2D &extent = cmd_state->render_areas[0].extent;
-            pass_pixel_count =
-               (uint64_t) extent.width * extent.height * MAX2(cmd_state->pass->num_views, framebuffer->layers);
-         }
-
-         return pass_pixel_count;
-      }
-
-      static bool render_area_is_large_for_binning(const struct tu_cmd_state *cmd_state,
-                                                   const struct tu_framebuffer *framebuffer)
-      {
-         const VkExtent2D &tile = cmd_state->tiling->tile0;
-         const uint64_t tile_pixel_count = (uint64_t) tile.width * tile.height;
-
-         /* Match the existing binning_useful threshold while using the actual
-          * render areas instead of only the framebuffer dimensions.
-          */
-         return get_pass_pixel_count(cmd_state, framebuffer) > tile_pixel_count * 2;
-      }
-
-      static constexpr bool fixed_costs_prefer_gmem(const struct tu_render_pass *pass)
-      {
-         /* Draw bandwidth is charged fully to SYSMEM but only at 1/10th of
-          * its cost to GMEM below.  Therefore, if attachment operations alone
-          * prefer GMEM, adding any amount of draw traffic cannot reverse the
-          * decision.
-          */
-         return (uint64_t) pass->sysmem_bandwidth_per_pixel * COST_DENOMINATOR >
-                (uint64_t) pass->gmem_bandwidth_per_pixel * GMEM_FIXED_COST_NUMERATOR;
-      }
-
       void update(uint32_t samples)
       {
          mean_samples_passed.add(samples);
@@ -1071,10 +1028,20 @@ struct tu_autotune::rp_history {
                                    const struct tu_framebuffer *framebuffer,
                                    const struct tu_render_pass_state *rp_state)
       {
-         const uint64_t pass_pixel_count = get_pass_pixel_count(cmd_state, framebuffer);
+         uint32_t pass_pixel_count = 0;
+         if (cmd_state->per_layer_render_area) {
+            for (unsigned i = 0; i < cmd_state->pass->num_views; i++) {
+               const VkExtent2D &extent = cmd_state->render_areas[i].extent;
+               pass_pixel_count += extent.width * extent.height;
+            }
+         } else {
+            const VkExtent2D &extent = cmd_state->render_areas[0].extent;
+            pass_pixel_count =
+               extent.width * extent.height * MAX2(cmd_state->pass->num_views, cmd_state->framebuffer->layers);
+         }
 
-         uint64_t sysmem_bandwidth = (uint64_t) pass->sysmem_bandwidth_per_pixel * pass_pixel_count;
-         uint64_t gmem_bandwidth = (uint64_t) pass->gmem_bandwidth_per_pixel * pass_pixel_count;
+         uint64_t sysmem_bandwidth = static_cast<uint64_t>(pass->sysmem_bandwidth_per_pixel) * pass_pixel_count;
+         uint64_t gmem_bandwidth = static_cast<uint64_t>(pass->gmem_bandwidth_per_pixel) * pass_pixel_count;
 
          uint64_t total_draw_call_bandwidth = 0;
          uint64_t mean_samples = mean_samples_passed.get();
@@ -1095,7 +1062,7 @@ struct tu_autotune::rp_history {
          /* Drawcalls access GMEM in GMEM rendering, but we do not want to ignore them completely.  The state changes
           * between tiles also have an overhead.  The magic numbers of 11 and 10 are randomly chosen.
           */
-         gmem_bandwidth = (gmem_bandwidth * GMEM_FIXED_COST_NUMERATOR + total_draw_call_bandwidth) / COST_DENOMINATOR;
+         gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;
 
          bool select_sysmem = sysmem_bandwidth <= gmem_bandwidth;
          render_mode mode = select_sysmem ? render_mode::SYSMEM : render_mode::GMEM;
@@ -1107,7 +1074,8 @@ struct tu_autotune::rp_history {
             ", render_areas[0]=%" PRIu32 "x%" PRIu32 ", sysmem_bandwidth_per_pixel=%" PRIu32
             ", gmem_bandwidth_per_pixel=%" PRIu32 ", sysmem_bandwidth=%" PRIu64 ", gmem_bandwidth=%" PRIu64,
             history.hash, rp_state->drawcall_count, render_mode_str(mode), mean_samples,
-            (float) rp_state->drawcall_bandwidth_per_sample_sum / rp_state->drawcall_count, total_draw_call_bandwidth,
+            static_cast<float>(rp_state->drawcall_bandwidth_per_sample_sum) / rp_state->drawcall_count,
+            total_draw_call_bandwidth,
             extent.width, extent.height, pass->sysmem_bandwidth_per_pixel, pass->gmem_bandwidth_per_pixel,
             sysmem_bandwidth, gmem_bandwidth);
 
@@ -1500,7 +1468,7 @@ tu_autotune::create_batch() const
 bool
 tu_autotune::supports_preempt_latency_tracking() const
 {
-   return supported_mod_flags & (uint32_t) mod_flag::PREEMPT_OPTIMIZE;
+   return supported_mod_flags & static_cast<uint32_t>(mod_flag::PREEMPT_OPTIMIZE);
 }
 
 void
@@ -1742,7 +1710,7 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
          if (TU_DEBUG(STARTUP) || active_config.load().test(mod_flag::PREEMPT_OPTIMIZE))
             mesa_logw("autotune: %s, preemption optimization not supported", fail_reason);
 
-         supported_mod_flags &= ~((uint32_t) mod_flag::PREEMPT_OPTIMIZE);
+         supported_mod_flags &= ~static_cast<uint32_t>(mod_flag::PREEMPT_OPTIMIZE);
          disable_preempt_optimize();
       }
    }
@@ -1892,36 +1860,20 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    if (key_opt && config.test(mod_flag::PREEMPT_OPTIMIZE))
       latency_info = get_rp_latency_info(key_opt->hash, true);
 
-   if (!enabled || simultaneous_use)
-      return default_mode;
-
    /* These smaller RPs with few draws are too difficult to create a balanced hash for that can independently identify
-    * them while not being so unique to not properly identify them across CBs. They're generally insignificant outside
-    * of a few edge cases such as during deferred rendering G-buffer passes, so we disable the autotuner for small RPs
-    * unless TUNE_SMALL is specified.
-    *
-    * Do not apply that fallback when static attachment bandwidth alone already guarantees that the bandwidth algorithm
-    * will select GMEM and the RP has enough tiles for binning to be useful. This covers bandwidth-heavy clear/resolve
-    * passes without creating a bandwidth history entry or GPU metric allocation. Outside preemption tracking it also
-    * avoids generating an RP hash. GMEM loads naturally increase the GMEM side of the same cost model.
+    * them while not being so unique to not properly identify them across CBs. They're generally insigificant outside of
+    * a few edge cases such as during deferred rendering G-buffer passes, as we don't have a good way to deal with those
+    * edge cases yet, we just disable the autotuner for small RPs entirely for now unless TUNE_SMALL is specified.
     *
     * Note: If we detect a small RP to be latency sensitive, we enable the autotuner for it anyway.
     */
-   const bool small_rp = rp_state->drawcall_count < 5;
-   const bool track_small_rp_latency = latency_info && latency_info->seen_latency_spike;
-   const bool statically_select_gmem =
-      small_rp && !config.test(mod_flag::TUNE_SMALL) && !track_small_rp_latency &&
-      config.is_enabled(algorithm::BANDWIDTH) && cmd_state->tiling->vsc.binning_useful &&
-      rp_history::bandwidth_algo::render_area_is_large_for_binning(cmd_state, framebuffer) &&
-      rp_history::bandwidth_algo::fixed_costs_prefer_gmem(pass);
+   bool ignore_small_rp = !config.test(mod_flag::TUNE_SMALL) && rp_state->drawcall_count < 5 &&
+                          (!latency_info || !latency_info->seen_latency_spike);
 
-   if (statically_select_gmem) {
-      at_log_base("small RP fixed attachment costs prefer GMEM");
-      return render_mode::GMEM;
-   }
-
-   bool ignore_small_rp = !config.test(mod_flag::TUNE_SMALL) && small_rp && !track_small_rp_latency;
-
+   if (!enabled)
+      return forced("Autotuner is disabled", default_mode);
+   if (simultaneous_use)
+      return forced("VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT", default_mode);
    if (ignore_small_rp)
       return forced("Too few draws to tune", default_mode);
 

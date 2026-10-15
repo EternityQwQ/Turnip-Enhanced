@@ -221,4 +221,8 @@ void kk_image_layout_init(const struct kk_device *dev,
                           const uint8_t width_scale, const uint8_t height_scale,
                           struct kk_image_layout *layout);
 
+void kk_image_layout_init_level_offsets(const struct kk_device *dev,
+                                        struct kk_image_layout *layout,
+                                        mtl_texture *texture);
+
 #endif /* KK_IMAGE_LAYOUT_H */

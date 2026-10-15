@@ -72,8 +72,12 @@ blorp_compile_fs_brw(struct blorp_context *blorp, void *mem_ctx,
    nir_remove_dead_variables(nir, nir_var_shader_in, NULL);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
    if (is_fast_clear || use_repclear) {
-      nir->info.api_subgroup_size = 16;
-      nir->info.max_subgroup_size = 16;
+      /* BSpec 57340, Gfx35+:
+       *
+       *    "SIMD32 mode is supported for Clearing shader"
+       */
+      nir->info.api_subgroup_size = compiler->devinfo->ver >= 35 ? 32 : 16;
+      nir->info.max_subgroup_size = compiler->devinfo->ver >= 35 ? 32 : 16;
       nir->info.min_subgroup_size = 16;
    }
 
@@ -86,24 +90,23 @@ blorp_compile_fs_brw(struct blorp_context *blorp, void *mem_ctx,
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
 
-   struct brw_compile_fs_params params = {
-      .base = {
-         .mem_ctx = mem_ctx,
-         .nir = nir,
-         .key = &wm_key.base,
-         .prog_data = (struct brw_stage_prog_data *)fs_prog_data,
-         .log_data = blorp->driver_ctx,
-         .debug_flag = DEBUG_BLORP,
-         .archiver = archiver,
+   struct brw_compile_params params = {
+      .mem_ctx = mem_ctx,
+      .nir = nir,
+      .key = &wm_key.base,
+      .prog_data = (struct brw_stage_prog_data *)fs_prog_data,
+      .log_data = blorp->driver_ctx,
+      .debug_flag = DEBUG_BLORP,
+      .fs = {
+         .use_rep_send = use_repclear,
+         .max_polygons = 1,
+         .rt_write_cb = blorp->config.use_efficient_64bit ?
+                        blorp_nir_rt_write : NULL,
       },
-
-      .rt_write_cb = blorp->config.use_efficient_64bit ? blorp_nir_rt_write : NULL,
-
-      .use_rep_send = use_repclear,
-      .max_polygons = 1,
+      .archiver = archiver,
    };
 
-   const unsigned *kernel = brw_compile(compiler, &params.base);
+   const unsigned *kernel = brw_compile(compiler, &params);
 
    debug_archiver_close(archiver);
 
@@ -127,13 +130,6 @@ blorp_compile_vs_brw(struct blorp_context *blorp, void *mem_ctx,
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    struct brw_vs_prog_data *vs_prog_data = rzalloc(mem_ctx, struct brw_vs_prog_data);
-   vs_prog_data->inputs_read = nir->info.inputs_read;
-
-   brw_compute_vue_map(compiler->devinfo,
-                       &vs_prog_data->base.vue_map,
-                       nir->info.outputs_written,
-                       nir->info.separate_shader,
-                       1);
 
    struct brw_vs_prog_key vs_key = {
       .base = {
@@ -144,19 +140,17 @@ blorp_compile_vs_brw(struct blorp_context *blorp, void *mem_ctx,
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
 
-   struct brw_compile_vs_params params = {
-      .base = {
-         .mem_ctx = mem_ctx,
-         .nir = nir,
-         .key = &vs_key.base,
-         .prog_data = (struct brw_stage_prog_data *)vs_prog_data,
-         .log_data = blorp->driver_ctx,
-         .debug_flag = DEBUG_BLORP,
-         .archiver = archiver,
-      },
+   struct brw_compile_params params = {
+      .mem_ctx = mem_ctx,
+      .nir = nir,
+      .key = &vs_key.base,
+      .prog_data = (struct brw_stage_prog_data *)vs_prog_data,
+      .log_data = blorp->driver_ctx,
+      .debug_flag = DEBUG_BLORP,
+      .archiver = archiver,
    };
 
-   const unsigned *kernel = brw_compile(compiler, &params.base);
+   const unsigned *kernel = brw_compile(compiler, &params);
 
    debug_archiver_close(archiver);
 
@@ -259,19 +253,17 @@ blorp_compile_cs_brw(struct blorp_context *blorp, void *mem_ctx,
    debug_archiver *archiver =
       blorp_debug_archiver_open(mem_ctx, nir, key, key_size);
 
-   struct brw_compile_cs_params params = {
-      .base = {
-         .mem_ctx = mem_ctx,
-         .nir = nir,
-         .key = &cs_key.base,
-         .prog_data = (struct brw_stage_prog_data *)cs_prog_data,
-         .log_data = blorp->driver_ctx,
-         .debug_flag = DEBUG_BLORP,
-         .archiver = archiver,
-      },
+   struct brw_compile_params params = {
+      .mem_ctx = mem_ctx,
+      .nir = nir,
+      .key = &cs_key.base,
+      .prog_data = (struct brw_stage_prog_data *)cs_prog_data,
+      .log_data = blorp->driver_ctx,
+      .debug_flag = DEBUG_BLORP,
+      .archiver = archiver,
    };
 
-   const unsigned *kernel = brw_compile(compiler, &params.base);
+   const unsigned *kernel = brw_compile(compiler, &params);
 
    debug_archiver_close(archiver);
 

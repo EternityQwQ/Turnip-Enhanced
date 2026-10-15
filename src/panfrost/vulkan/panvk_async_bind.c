@@ -174,12 +174,12 @@ panvk_async_bind_process_signals(struct panvk_async_bind *submit)
       return ret;
 
    if (submit->force_sync) {
-      ASSERTED int ret = drmSyncobjWait(device->drm_fd,
-                               &submit->syncobj_handle, 1, INT64_MAX,
-                               DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
+      ASSERTED int ret =
+         pan_kmod_sync_wait(device->kmod.dev, &submit->syncobj_handle, 1,
+                            INT64_MAX, DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL, NULL);
       assert(!ret);
 
-      drmSyncobjReset(device->drm_fd, &submit->syncobj_handle, 1);
+      pan_kmod_sync_reset(device->kmod.dev, &submit->syncobj_handle, 1);
    }
 
    return 0;

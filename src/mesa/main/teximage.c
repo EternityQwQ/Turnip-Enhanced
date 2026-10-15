@@ -1016,13 +1016,23 @@ _mesa_legal_texture_dimensions(struct gl_context *ctx, GLenum target,
 {
    GLint maxSize;
 
+   /* From the OpenGL ES 2.0 spec, section 3.7.1 (Texture Image Specification):
+    * If level is greater than zero, and either width or height is not a power
+    * of two, the error INVALID_VALUE is generated.
+    */
+   const bool allow_npot =
+      _mesa_has_ARB_texture_non_power_of_two(ctx) ||
+      _mesa_has_OES_texture_npot(ctx) ||
+      (_mesa_is_desktop_gl(ctx) && ctx->Version >= 20) ||
+      (_mesa_is_gles2(ctx) && level == 0);
+
    switch (target) {
    case GL_TEXTURE_1D:
    case GL_PROXY_TEXTURE_1D:
       maxSize = ctx->Const.MaxTextureSize >> level;
       if (width < 2 * border || width > 2 * border + maxSize)
          return GL_FALSE;
-      if (!ctx->Extensions.ARB_texture_non_power_of_two) {
+      if (!allow_npot) {
          if (width > 0 && !util_is_power_of_two_nonzero(width - 2 * border))
             return GL_FALSE;
       }
@@ -1037,7 +1047,7 @@ _mesa_legal_texture_dimensions(struct gl_context *ctx, GLenum target,
          return GL_FALSE;
       if (height < 2 * border || height > 2 * border + maxSize)
          return GL_FALSE;
-      if (!ctx->Extensions.ARB_texture_non_power_of_two) {
+      if (!allow_npot) {
          if (width > 0 && !util_is_power_of_two_nonzero(width - 2 * border))
             return GL_FALSE;
          if (height > 0 && !util_is_power_of_two_nonzero(height - 2 * border))
@@ -1055,7 +1065,7 @@ _mesa_legal_texture_dimensions(struct gl_context *ctx, GLenum target,
          return GL_FALSE;
       if (depth < 2 * border || depth > 2 * border + maxSize)
          return GL_FALSE;
-      if (!ctx->Extensions.ARB_texture_non_power_of_two) {
+      if (!allow_npot) {
          if (width > 0 && !util_is_power_of_two_nonzero(width - 2 * border))
             return GL_FALSE;
          if (height > 0 && !util_is_power_of_two_nonzero(height - 2 * border))
@@ -1092,7 +1102,7 @@ _mesa_legal_texture_dimensions(struct gl_context *ctx, GLenum target,
          return GL_FALSE;
       if (height < 2 * border || height > 2 * border + maxSize)
          return GL_FALSE;
-      if (!ctx->Extensions.ARB_texture_non_power_of_two) {
+      if (!allow_npot) {
          if (width > 0 && !util_is_power_of_two_nonzero(width - 2 * border))
             return GL_FALSE;
          if (height > 0 && !util_is_power_of_two_nonzero(height - 2 * border))
@@ -1107,7 +1117,7 @@ _mesa_legal_texture_dimensions(struct gl_context *ctx, GLenum target,
          return GL_FALSE;
       if (height < 0 || height > ctx->Const.MaxArrayTextureLayers)
          return GL_FALSE;
-      if (!ctx->Extensions.ARB_texture_non_power_of_two) {
+      if (!allow_npot) {
          if (width > 0 && !util_is_power_of_two_nonzero(width - 2 * border))
             return GL_FALSE;
       }
@@ -1124,7 +1134,7 @@ _mesa_legal_texture_dimensions(struct gl_context *ctx, GLenum target,
          return GL_FALSE;
       if (depth < 0 || depth > ctx->Const.MaxArrayTextureLayers)
          return GL_FALSE;
-      if (!ctx->Extensions.ARB_texture_non_power_of_two) {
+      if (!allow_npot) {
          if (width > 0 && !util_is_power_of_two_nonzero(width - 2 * border))
             return GL_FALSE;
          if (height > 0 && !util_is_power_of_two_nonzero(height - 2 * border))
@@ -1145,7 +1155,7 @@ _mesa_legal_texture_dimensions(struct gl_context *ctx, GLenum target,
          return GL_FALSE;
       if (level >= ctx->Const.MaxCubeTextureLevels)
          return GL_FALSE;
-      if (!ctx->Extensions.ARB_texture_non_power_of_two) {
+      if (!allow_npot) {
          if (width > 0 && !util_is_power_of_two_nonzero(width - 2 * border))
             return GL_FALSE;
          if (height > 0 && !util_is_power_of_two_nonzero(height - 2 * border))
@@ -6455,7 +6465,7 @@ _mesa_get_texbuffer_format(const struct gl_context *ctx, GLenum internalFormat)
 
    switch (internalFormat) {
    case GL_RGBA8:
-      return MESA_FORMAT_R8G8B8A8_UNORM;
+      return MESA_FORMAT_RGBA_UNORM8;
    case GL_RGBA16:
       if (_mesa_is_gles(ctx) && !_mesa_has_EXT_texture_norm16(ctx))
          return MESA_FORMAT_NONE;
