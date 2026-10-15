@@ -127,7 +127,11 @@ driConfigEqual(struct glx_config *config, const struct dri_config *driConfig)
             glxValue |= GLX_TEXTURE_2D_BIT_EXT;
          if (value & __DRI_ATTRIB_TEXTURE_RECTANGLE_BIT)
             glxValue |= GLX_TEXTURE_RECTANGLE_BIT_EXT;
+         /* a server config that can't be bound to any target doesn't care
+          * which targets the driver config supports
+          */
          if (config->bindToTextureTargets != GLX_DONT_CARE &&
+             config->bindToTextureTargets &&
              glxValue != config->bindToTextureTargets)
             return GL_FALSE;
          break;
@@ -164,6 +168,55 @@ driConfigEqual(struct glx_config *config, const struct dri_config *driConfig)
             }
             config->numAuxBuffers = 0;
          }
+         break;
+
+      /* Multisampled driver configs never have an accumulation buffer. If
+       * the server's multisampled config has one, drop it from the server
+       * config instead of losing the config. Single-sampled configs must
+       * still match exactly, since the driver has both variants of those.
+       */
+      case __DRI_ATTRIB_ACCUM_RED_SIZE:
+      case __DRI_ATTRIB_ACCUM_GREEN_SIZE:
+      case __DRI_ATTRIB_ACCUM_BLUE_SIZE:
+      case __DRI_ATTRIB_ACCUM_ALPHA_SIZE:
+         if (!scalarEqual(config, attrib, value)) {
+            if (value || !config->sampleBuffers)
+               return GL_FALSE;
+            config->accumRedBits = 0;
+            config->accumGreenBits = 0;
+            config->accumBlueBits = 0;
+            config->accumAlphaBits = 0;
+         }
+         break;
+
+      /* The texture-from-pixmap attributes only matter if the server can
+       * bind the config to a texture at all.
+       */
+      case __DRI_ATTRIB_BIND_TO_TEXTURE_RGB:
+         if (!scalarEqual(config, attrib, value) && config->bindToTextureRgb)
+            return GL_FALSE;
+         break;
+
+      case __DRI_ATTRIB_BIND_TO_TEXTURE_RGBA:
+         if (!scalarEqual(config, attrib, value) && config->bindToTextureRgba)
+            return GL_FALSE;
+         break;
+
+      /* same as accumulation buffers: a multisampled server config may
+       * advertise sRGB where the driver config does not
+       */
+      case __DRI_ATTRIB_FRAMEBUFFER_SRGB_CAPABLE:
+         if (!scalarEqual(config, attrib, value)) {
+            if (value || !config->sampleBuffers)
+               return GL_FALSE;
+            config->sRGBCapable = 0;
+         }
+         break;
+
+      case __DRI_ATTRIB_YINVERTED:
+         if (!scalarEqual(config, attrib, value) &&
+             (config->bindToTextureRgb || config->bindToTextureRgba))
+            return GL_FALSE;
          break;
 
       case __DRI_ATTRIB_BIND_TO_MIPMAP_TEXTURE:
@@ -941,7 +994,7 @@ dri_bind_tex_image(__GLXDRIdrawable *base, int buffer, const int *attrib_list)
 }
 
 bool
-dri_screen_init(struct glx_screen *psc, struct glx_display *priv, int screen, int fd, const __DRIextension **loader_extensions, bool driver_name_is_inferred)
+dri_screen_init(struct glx_screen *psc, struct glx_display *priv, int screen, int fd, const struct dri_loader_funcs *loader_funcs, bool driver_name_is_inferred)
 {
    const struct dri_config **driver_configs;
    struct glx_config *configs = NULL, *visuals = NULL;
@@ -965,7 +1018,7 @@ dri_screen_init(struct glx_screen *psc, struct glx_display *priv, int screen, in
    }
 
    psc->frontend_screen = driCreateNewScreen3(screen, fd,
-                                                 loader_extensions,
+                                                 loader_funcs,
                                                  type,
                                                  &driver_configs, driver_name_is_inferred,
                                                  psc->display->has_multibuffer, psc);

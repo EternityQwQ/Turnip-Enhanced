@@ -9,6 +9,7 @@
 
 #include "gen_enums.h"
 #include "gen_types.h"
+#include "util/bitpack_helpers.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -430,7 +431,7 @@ lsc_op_num_data_values(unsigned _op)
 }
 
 static inline uint32_t
-lsc_data_size_bytes(enum lsc_data_size data_size)
+lsc_data_size_register_bytes(enum lsc_data_size data_size)
 {
    switch (data_size) {
    case LSC_DATA_SIZE_D8:      return 1;
@@ -439,6 +440,23 @@ lsc_data_size_bytes(enum lsc_data_size data_size)
    case LSC_DATA_SIZE_D8U32:
    case LSC_DATA_SIZE_D16U32:
    case LSC_DATA_SIZE_D16BF32: return 4;
+   case LSC_DATA_SIZE_D64:     return 8;
+   default:
+      assert(!"Unsupported LSC data size");
+      return 0;
+   }
+}
+
+static inline uint32_t
+lsc_data_size_memory_bytes(enum lsc_data_size data_size)
+{
+   switch (data_size) {
+   case LSC_DATA_SIZE_D8U32:
+   case LSC_DATA_SIZE_D8:      return 1;
+   case LSC_DATA_SIZE_D16U32:
+   case LSC_DATA_SIZE_D16BF32:
+   case LSC_DATA_SIZE_D16:     return 2;
+   case LSC_DATA_SIZE_D32:     return 4;
    case LSC_DATA_SIZE_D64:     return 8;
    default:
       assert(!"Unsupported LSC data size");
@@ -505,7 +523,7 @@ lsc_64bit_msg_desc(const struct intel_device_info *devinfo,
                    bool transpose,
                    unsigned cache_ctrl,
                    unsigned scale_offset,
-                   unsigned global_offset,
+                   int32_t global_offset,
                    unsigned surface_state_index)
 {
    /*
@@ -602,10 +620,10 @@ lsc_64bit_msg_desc(const struct intel_device_info *devinfo,
 
    if (is_stateless) {
       assert(surface_state_index == 0);
-      msg_desc |= SET_BITS_64(global_offset, 43, 22);
+      msg_desc |= util_bitpack_sint(global_offset, 22, 43);
    } else {
       msg_desc |= SET_BITS_64(surface_state_index, 26, 22);
-      msg_desc |= SET_BITS_64(global_offset, 43, 27);
+      msg_desc |= util_bitpack_sint(global_offset, 27, 43);
    }
 
    return msg_desc;
@@ -869,7 +887,7 @@ gen_swsb_src_dep(gen_swsb swsb)
 static inline int
 gen_inst_send_src0_len(const gen_inst *inst)
 {
-   if (inst->opcode == GEN_OP_SENDG)
+   if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
       return inst->send.src0_len;
 
    if (inst->send.desc_is_reg)
@@ -900,10 +918,10 @@ gen_is_lsc_translated_sfid(const struct intel_device_info *devinfo, gen_sfid sfi
 static inline int
 gen_inst_send_dst_len(const struct intel_device_info *devinfo, const gen_inst *inst)
 {
-   if (inst->opcode == GEN_OP_SENDG) {
+   if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC) {
       if (gen_is_lsc_translated_sfid(devinfo, inst->send.sfid)) {
          enum lsc_data_size data_size = gen_lsc_64bit_msg_desc_get_data_size(inst->send.combined_desc);
-         uint32_t data_size_bytes = lsc_data_size_bytes(data_size);
+         uint32_t data_size_bytes = lsc_data_size_register_bytes(data_size);
 
          return DIV_ROUND_UP(data_size_bytes * inst->exec_size, devinfo->grf_size);
       }
@@ -920,7 +938,7 @@ static inline int
 gen_inst_send_src1_len(const struct intel_device_info *devinfo,
                        const gen_inst *inst)
 {
-   if (inst->opcode == GEN_OP_SENDG)
+   if (inst->opcode == GEN_OP_SENDG || inst->opcode == GEN_OP_SENDGC)
       return inst->send.src1_len;
 
    if (inst->send.src1_len)

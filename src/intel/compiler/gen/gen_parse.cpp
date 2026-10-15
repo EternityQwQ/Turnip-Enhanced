@@ -79,7 +79,7 @@ gen_msg_dest_len(const struct intel_device_info *devinfo,
                      enum lsc_data_size data_sz,
                      unsigned n)
 {
-   return DIV_ROUND_UP(lsc_data_size_bytes(data_sz) * n,
+   return DIV_ROUND_UP(lsc_data_size_register_bytes(data_sz) * n,
                        devinfo->grf_size);
 }
 
@@ -744,6 +744,8 @@ struct gen_parser {
       if (has_dst) {
          if (!parse_dst())
             return false;
+      } else {
+         inst.dst.region.hstride = 1;
       }
 
       if (inst.opcode == GEN_OP_WAIT) {
@@ -1730,7 +1732,7 @@ struct gen_parser {
       if (x_off < -512 || x_off > 511 || y_off < -512 || y_off > 511)
          return errorf("block2d offset out of signed 10-bit range");
 
-      const unsigned element_bytes = lsc_data_size_bytes(lsc.desc.data_size);
+      const unsigned element_bytes = lsc_data_size_register_bytes(lsc.desc.data_size);
       if ((x_off * (int)element_bytes) % 4 != 0 ||
           (y_off * (int)element_bytes) % 4 != 0)
          return errorf("block2d offset must be dword aligned in bytes");

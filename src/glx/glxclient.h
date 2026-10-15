@@ -541,6 +541,7 @@ struct glx_screen
    bool force_direct_context;
    bool allow_invalid_glx_destroy_window;
    bool keep_native_window_glx_drawable;
+   bool client_side_glx_window;
    bool can_EXT_texture_from_pixmap;
 
    char *driverName;
