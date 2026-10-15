@@ -15,7 +15,7 @@
 #include "tu_knl.h"
 
 /* externally-synchronized BO suballocator. */
-#define TU_SUBALLOC_CACHED_BOS 4
+#define TU_SUBALLOC_CACHED_BOS 8
 struct tu_suballocator
 {
    struct tu_device *dev;

@@ -3058,7 +3058,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       global_size += TU_BORDER_COLOR_COUNT * sizeof(struct bcolor_entry);
 
    tu_bo_suballocator_init(
-      &device->pipeline_suballoc, device, 128 * 1024,
+      &device->pipeline_suballoc, device, 256 * 1024,
       static_cast<enum tu_bo_alloc_flags>(TU_BO_ALLOC_GPU_READ_ONLY |
                                           TU_BO_ALLOC_ALLOW_DUMP |
                                           TU_BO_ALLOC_INTERNAL_RESOURCE |
@@ -3066,7 +3066,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       "pipeline_suballoc");
    if (is_kgsl(physical_device->instance)) {
       tu_bo_suballocator_init(&device->kgsl_profiling_suballoc, device,
-                              128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
+                              256 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
                               "kgsl_profiling_suballoc");
    }
 
@@ -3079,7 +3079,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    tu_bo_suballocator_init(
       &device->vis_stream_suballocator, device,
-      getpagesize(),
+      2 * getpagesize(),
       static_cast<enum tu_bo_alloc_flags>(TU_BO_ALLOC_INTERNAL_RESOURCE |
                                           TU_BO_ALLOC_ALLOW_DUMP),
       "vis_stream_suballoc");
@@ -3152,7 +3152,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_pipeline_cache;
    }
 
-   tu_cs_init(&device->sub_cs, device, TU_CS_MODE_SUB_STREAM, 1024, "device sub cs");
+   tu_cs_init(&device->sub_cs, device, TU_CS_MODE_SUB_STREAM, 4096, "device sub cs");
 
    if (device->vk.enabled_features.performanceCounterQueryPools) {
       /* Prepare command streams setting pass index to the PERF_CNTRS_REG

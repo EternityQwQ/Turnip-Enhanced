@@ -554,7 +554,8 @@ tu_emit_cache_flush(struct tu_cmd_buffer *cmd_buffer)
    if ((flushes & TU_CMD_FLAG_WAIT_FOR_BR) && CHIP >= A7XX &&
        !(cmd_buffer->state.pass && cmd_buffer->state.renderpass_cb_disabled) &&
        cmd_buffer->device->instance->drirc.perf.allow_concurrent_binning) {
-      trace_start_concurrent_binning_barrier(&cmd_buffer->trace, cs, cmd_buffer);
+      if (u_trace_should_process(&cmd_buffer->device->trace_context))
+         trace_start_concurrent_binning_barrier(&cmd_buffer->trace, cs, cmd_buffer);
 
       /* Wait-for-BR when repeated a lot of times per frame can add up
        * and tank performance.
@@ -2767,10 +2768,12 @@ tu6_emit_binning_pass(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
    tu_cs_emit_regs(cs,
                    A6XX_TPL1_WINDOW_OFFSET(.x = 0, .y = 0));
 
-   if (use_cb)
-      trace_start_concurrent_binning_ib(&cmd->trace, cs, cmd);
-   else
-      trace_start_binning_ib(&cmd->trace, cs, cmd);
+   if (u_trace_should_process(&cmd->device->trace_context)) {
+      if (use_cb)
+         trace_start_concurrent_binning_ib(&cmd->trace, cs, cmd);
+      else
+         trace_start_binning_ib(&cmd->trace, cs, cmd);
+   }
 
    /* emit IB to binning drawcmds: */
    tu_cs_emit_call(cs, &cmd->draw_cs);
@@ -3792,7 +3795,8 @@ tu6_render_tile(struct tu_cmd_buffer *cmd, struct tu_cs *cs,
    tu6_emit_tile_select<CHIP>(cmd, &cmd->cs, tile, fdm_offsets);
    tu_lrz_before_tile<CHIP>(cmd, &cmd->cs);
 
-   trace_start_draw_ib_gmem(&cmd->trace, &cmd->cs, cmd);
+   if (u_trace_should_process(&cmd->device->trace_context))
+      trace_start_draw_ib_gmem(&cmd->trace, &cmd->cs, cmd);
 
    cmd->device->autotune->begin_tile(cmd, cs, rp_ctx, tile_idx);
 
@@ -4163,7 +4167,8 @@ tu_cmd_render_sysmem(struct tu_cmd_buffer *cmd,
 
    tu6_sysmem_render_begin<CHIP>(cmd, &cmd->cs, rp_ctx);
 
-   trace_start_draw_ib_sysmem(&cmd->trace, &cmd->cs, cmd);
+   if (u_trace_should_process(&cmd->device->trace_context))
+      trace_start_draw_ib_sysmem(&cmd->trace, &cmd->cs, cmd);
 
    tu_cs_emit_call(&cmd->cs, &cmd->draw_cs);
 
@@ -4272,13 +4277,13 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
       }
    }
 
-   tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
-   tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
-   tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
-   tu_cs_init(&cmd_buffer->draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "draw epilogue cs");
-   tu_cs_init(&cmd_buffer->sub_cs, device, TU_CS_MODE_SUB_STREAM, 2048, "draw sub cs");
-   tu_cs_init(&cmd_buffer->pre_chain.draw_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw cs");
-   tu_cs_init(&cmd_buffer->pre_chain.draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw epiligoue cs");
+   tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 16384, "cmd cs");
+   tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 16384, "draw cs");
+   tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 8192, "tile store cs");
+   tu_cs_init(&cmd_buffer->draw_epilogue_cs, device, TU_CS_MODE_GROW, 8192, "draw epilogue cs");
+   tu_cs_init(&cmd_buffer->sub_cs, device, TU_CS_MODE_SUB_STREAM, 8192, "draw sub cs");
+   tu_cs_init(&cmd_buffer->pre_chain.draw_cs, device, TU_CS_MODE_GROW, 16384, "prechain draw cs");
+   tu_cs_init(&cmd_buffer->pre_chain.draw_epilogue_cs, device, TU_CS_MODE_GROW, 8192, "prechain draw epiligoue cs");
 
    for (unsigned i = 0; i < MAX_BIND_POINTS; i++)
       cmd_buffer->descriptors[i].push_set.base.type = VK_OBJECT_TYPE_DESCRIPTOR_SET;
@@ -8687,13 +8692,15 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
    const struct tu_program_state *program = &cmd->state.program;
    struct tu_render_pass_state *rp = &cmd->state.rp;
 
-   trace_start_draw(
-      &cmd->rp_trace, &cmd->draw_cs, cmd, draw_count,
-      cmd->state.program.stage_blake3[MESA_SHADER_VERTEX],
-      cmd->state.program.stage_blake3[MESA_SHADER_TESS_CTRL],
-      cmd->state.program.stage_blake3[MESA_SHADER_TESS_EVAL],
-      cmd->state.program.stage_blake3[MESA_SHADER_GEOMETRY],
-      cmd->state.program.stage_blake3[MESA_SHADER_FRAGMENT]);
+   if (u_trace_should_process(&cmd->device->trace_context)) {
+      trace_start_draw(
+         &cmd->rp_trace, &cmd->draw_cs, cmd, draw_count,
+         cmd->state.program.stage_blake3[MESA_SHADER_VERTEX],
+         cmd->state.program.stage_blake3[MESA_SHADER_TESS_CTRL],
+         cmd->state.program.stage_blake3[MESA_SHADER_TESS_EVAL],
+         cmd->state.program.stage_blake3[MESA_SHADER_GEOMETRY],
+         cmd->state.program.stage_blake3[MESA_SHADER_FRAGMENT]);
+   }
 
    /* Emit state first, because it's needed for bandwidth calculations */
    uint32_t dynamic_draw_state_dirty = 0;
@@ -10099,8 +10106,9 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
    }
 
    if (info->indirect) {
-      trace_start_compute_indirect(&cmd->trace, cs, cmd, info->unaligned,
-                                   const_cast<char *>(shader->variant->blake3_str));
+      if (u_trace_should_process(&cmd->device->trace_context))
+         trace_start_compute_indirect(&cmd->trace, cs, cmd, info->unaligned,
+                                      const_cast<char *>(shader->variant->blake3_str));
 
       if (info->unaligned) {
          tu_cs_emit_pkt7(cs, CP_RUN_OPENCL, 1);
@@ -10122,10 +10130,11 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
                                     .offset = info->indirect,
                                  });
    } else {
-      trace_start_compute(&cmd->trace, cs, cmd, info->indirect != 0,
-                          info->unaligned, local_size[0], local_size[1],
-                          local_size[2], info->blocks[0], info->blocks[1],
-                          info->blocks[2], const_cast<char *>(shader->variant->blake3_str));
+      if (u_trace_should_process(&cmd->device->trace_context))
+         trace_start_compute(&cmd->trace, cs, cmd, info->indirect != 0,
+                             info->unaligned, local_size[0], local_size[1],
+                             local_size[2], info->blocks[0], info->blocks[1],
+                             info->blocks[2], const_cast<char *>(shader->variant->blake3_str));
 
       if (info->unaligned) {
          tu_cs_emit_pkt7(cs, CP_EXEC_CS, 4);
