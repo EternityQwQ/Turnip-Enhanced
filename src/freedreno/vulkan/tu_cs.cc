@@ -37,6 +37,13 @@ tu_cs_init(struct tu_cs *cs,
    cs->mode = mode;
    cs->next_bo_size = initial_size;
    cs->name = name;
+
+   if (mode == TU_CS_MODE_GROW) {
+      cs->entries = static_cast<struct tu_cs_entry *>(
+         malloc(32 * sizeof(struct tu_cs_entry)));
+      if (cs->entries)
+         cs->entry_capacity = 32;
+   }
 }
 
 /**

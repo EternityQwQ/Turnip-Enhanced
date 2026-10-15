@@ -3152,7 +3152,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_pipeline_cache;
    }
 
-   tu_cs_init(&device->sub_cs, device, TU_CS_MODE_SUB_STREAM, 1024, "device sub cs");
+   tu_cs_init(&device->sub_cs, device, TU_CS_MODE_SUB_STREAM, 4096, "device sub cs");
 
    if (device->vk.enabled_features.performanceCounterQueryPools) {
       /* Prepare command streams setting pass index to the PERF_CNTRS_REG

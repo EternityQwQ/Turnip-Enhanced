@@ -4272,13 +4272,13 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
       }
    }
 
-   tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
-   tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
-   tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
-   tu_cs_init(&cmd_buffer->draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "draw epilogue cs");
-   tu_cs_init(&cmd_buffer->sub_cs, device, TU_CS_MODE_SUB_STREAM, 2048, "draw sub cs");
-   tu_cs_init(&cmd_buffer->pre_chain.draw_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw cs");
-   tu_cs_init(&cmd_buffer->pre_chain.draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "prechain draw epiligoue cs");
+   tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 16384, "cmd cs");
+   tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 16384, "draw cs");
+   tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 8192, "tile store cs");
+   tu_cs_init(&cmd_buffer->draw_epilogue_cs, device, TU_CS_MODE_GROW, 8192, "draw epilogue cs");
+   tu_cs_init(&cmd_buffer->sub_cs, device, TU_CS_MODE_SUB_STREAM, 8192, "draw sub cs");
+   tu_cs_init(&cmd_buffer->pre_chain.draw_cs, device, TU_CS_MODE_GROW, 16384, "prechain draw cs");
+   tu_cs_init(&cmd_buffer->pre_chain.draw_epilogue_cs, device, TU_CS_MODE_GROW, 8192, "prechain draw epiligoue cs");
 
    for (unsigned i = 0; i < MAX_BIND_POINTS; i++)
       cmd_buffer->descriptors[i].push_set.base.type = VK_OBJECT_TYPE_DESCRIPTOR_SET;
@@ -8687,13 +8687,15 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
    const struct tu_program_state *program = &cmd->state.program;
    struct tu_render_pass_state *rp = &cmd->state.rp;
 
-   trace_start_draw(
-      &cmd->rp_trace, &cmd->draw_cs, cmd, draw_count,
-      cmd->state.program.stage_blake3[MESA_SHADER_VERTEX],
-      cmd->state.program.stage_blake3[MESA_SHADER_TESS_CTRL],
-      cmd->state.program.stage_blake3[MESA_SHADER_TESS_EVAL],
-      cmd->state.program.stage_blake3[MESA_SHADER_GEOMETRY],
-      cmd->state.program.stage_blake3[MESA_SHADER_FRAGMENT]);
+   if (u_trace_should_process(&cmd->device->trace_context)) {
+      trace_start_draw(
+         &cmd->rp_trace, &cmd->draw_cs, cmd, draw_count,
+         cmd->state.program.stage_blake3[MESA_SHADER_VERTEX],
+         cmd->state.program.stage_blake3[MESA_SHADER_TESS_CTRL],
+         cmd->state.program.stage_blake3[MESA_SHADER_TESS_EVAL],
+         cmd->state.program.stage_blake3[MESA_SHADER_GEOMETRY],
+         cmd->state.program.stage_blake3[MESA_SHADER_FRAGMENT]);
+   }
 
    /* Emit state first, because it's needed for bandwidth calculations */
    uint32_t dynamic_draw_state_dirty = 0;
