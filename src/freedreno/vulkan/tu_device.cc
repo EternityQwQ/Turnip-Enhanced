@@ -3058,7 +3058,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       global_size += TU_BORDER_COLOR_COUNT * sizeof(struct bcolor_entry);
 
    tu_bo_suballocator_init(
-      &device->pipeline_suballoc, device, 128 * 1024,
+      &device->pipeline_suballoc, device, 256 * 1024,
       static_cast<enum tu_bo_alloc_flags>(TU_BO_ALLOC_GPU_READ_ONLY |
                                           TU_BO_ALLOC_ALLOW_DUMP |
                                           TU_BO_ALLOC_INTERNAL_RESOURCE |
