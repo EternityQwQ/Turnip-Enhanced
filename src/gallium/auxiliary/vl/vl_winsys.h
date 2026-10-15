@@ -114,17 +114,8 @@ struct vl_screen *vl_kopper_screen_create_win32(LUID *adapter);
 struct vl_screen *
 vl_drm_screen_create(int fd, bool honor_dri_prime);
 
-#ifdef USE_XSHM
-struct vl_screen *
-vl_xlib_swrast_screen_create(Display *display, int screen);
-static inline struct vl_screen *
-vl_vgem_drm_screen_create(int fd) { return NULL; }
-#else
 struct vl_screen *
 vl_vgem_drm_screen_create(int fd);
-static inline struct vl_screen *
-vl_xlib_swrast_screen_create(void *display, int screen) { return NULL; }
-#endif
 #endif
 
 #endif

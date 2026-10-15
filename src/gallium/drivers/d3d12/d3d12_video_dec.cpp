@@ -383,6 +383,8 @@ d3d12_video_decoder_store_upper_layer_references(struct d3d12_video_decoder *pD3
 {
 #if D3D12_VIDEO_ANY_DECODER_ENABLED
    pD3D12Dec->m_pCurrentDecodeTarget = target;
+   // Reset each frame; only AV1 frames with film grain enabled set it below.
+   pD3D12Dec->m_pCurrentFilmGrainTarget = nullptr;
    switch (pD3D12Dec->m_d3d12DecProfileType) {
 #if VIDEO_CODEC_H264DEC
       case d3d12_video_decode_profile_type_h264:
@@ -403,6 +405,10 @@ d3d12_video_decoder_store_upper_layer_references(struct d3d12_video_decoder *pD3
       {
          pipe_av1_picture_desc *pPicControlAV1 = (pipe_av1_picture_desc *) picture;
          pD3D12Dec->m_pCurrentReferenceTargets = pPicControlAV1->ref;
+         // AV1 film grain is applied to a separate display surface; the decoded (grain-free)
+         // reconstruction still goes to the DPB. Capture it here so end_frame can route the
+         // grain-applied conversion output to it instead of the reconstruction target.
+         pD3D12Dec->m_pCurrentFilmGrainTarget = pPicControlAV1->film_grain_target;
       } break;
 #endif
 #if VIDEO_CODEC_VP9DEC
@@ -575,6 +581,30 @@ d3d12_video_decoder_end_frame(struct pipe_video_codec *codec,
       return 1;
    }
 
+   // AV1 film grain: the DecodeFrame conversion produces a grain-applied copy in the output
+   // texture while the grain-free reconstruction is written to the reference texture (which goes
+   // to the DPB). Redirect only the output texture to film_grain_target so the grain-applied
+   // frame lands in the surface the client displays, leaving all DPB/reference bookkeeping keyed
+   // to the reconstruction target above (its index mapping was assigned against that target).
+   //
+   // Scope this to reference-only-textures-required configs. Only there does the ConversionArguments
+   // path below (gated on the same flag) actually run, separating the grain-applied output from the
+   // grain-free reconstruction. On non-reference-only or texture-array-DPB configs the output texture
+   // is where the grain-free recon / DPB entry is written, so redirecting it would drop the DPB write
+   // and leave the film-grain surface without grain. Those cases need a larger refactor tracked
+   // separately.
+   bool fReferenceOnly = (pD3D12Dec->m_ConfigDecoderSpecificFlags &
+                          d3d12_video_decode_config_specific_flag_reference_only_textures_required) != 0;
+   if (fReferenceOnly &&
+       pD3D12Dec->m_pCurrentFilmGrainTarget &&
+       pD3D12Dec->m_pCurrentFilmGrainTarget != target) {
+      struct d3d12_video_buffer *pFGVideoBuffer =
+         (struct d3d12_video_buffer *) pD3D12Dec->m_pCurrentFilmGrainTarget;
+      pOutputD3D12Texture = d3d12_resource_resource(pFGVideoBuffer->texture);
+      outputD3D12Subresource = 0;
+      d3d12_promote_to_permanent_residency(pD3D12Dec->m_pD3D12Screen, &pFGVideoBuffer->texture, 1);
+   }
+
    ///
    /// Set codec picture parameters CPU buffer
    ///
@@ -618,8 +648,6 @@ d3d12_video_decoder_end_frame(struct pipe_video_codec *codec,
    d3d12OutputArguments.pOutputTexture2D = pOutputD3D12Texture;
    d3d12OutputArguments.OutputSubresource = outputD3D12Subresource;
 
-   bool fReferenceOnly = (pD3D12Dec->m_ConfigDecoderSpecificFlags &
-                          d3d12_video_decode_config_specific_flag_reference_only_textures_required) != 0;
    if (fReferenceOnly) {
       d3d12OutputArguments.ConversionArguments.Enable = true;
 
@@ -1187,9 +1215,16 @@ d3d12_video_decoder_reconfigure_dpb(struct d3d12_video_decoder *pD3D12Dec,
       pD3D12Dec->m_decoderDesc = decoderDesc;
    }
 
+   // Grow-only decoder heap: only (re)create the heap when the requested resolution exceeds the
+   // current heap, mirroring the grow-only policy used below for MaxDecodePictureBufferCount.
+   // DecodeFrame requires every referenced decoder heap to be the same object as the current decode
+   // heap unless the driver reports
+   // D3D12_VIDEO_DECODE_CONFIGURATION_FLAG_ALLOW_RESOLUTION_CHANGE_ON_NON_KEY_FRAME. Recreating a
+   // smaller heap on a mid-stream downscale would no longer match retained references in the DPB, so
+   // reuse the larger heap and let the smaller frame decode into it.
    if (!pD3D12Dec->m_spDPBManager || !pD3D12Dec->m_spVideoDecoderHeap ||
-       pD3D12Dec->m_decodeFormat != outputResourceDesc.Format || pD3D12Dec->m_decoderHeapDesc.DecodeWidth != width ||
-       pD3D12Dec->m_decoderHeapDesc.DecodeHeight != height ||
+       pD3D12Dec->m_decodeFormat != outputResourceDesc.Format || pD3D12Dec->m_decoderHeapDesc.DecodeWidth < width ||
+       pD3D12Dec->m_decoderHeapDesc.DecodeHeight < height ||
        pD3D12Dec->m_decoderHeapDesc.MaxDecodePictureBufferCount < maxDPB) {
       // Detect the combination of AOT/ReferenceOnly to configure the DPB manager
       uint16_t referenceCount = (conversionArguments.Enable) ? (uint16_t) conversionArguments.ReferenceFrameCount +

@@ -24,8 +24,8 @@ tu_CreateBuffer(VkDevice _device,
    VK_FROM_HANDLE(tu_device, device, _device);
    struct tu_buffer *buffer;
 
-   buffer = (struct tu_buffer *) vk_buffer_create(
-      &device->vk, pCreateInfo, pAllocator, sizeof(*buffer));
+   buffer = static_cast<struct tu_buffer *>(vk_buffer_create(
+      &device->vk, pCreateInfo, pAllocator, sizeof(*buffer)));
    if (buffer == NULL)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -52,7 +52,7 @@ tu_CreateBuffer(VkDevice _device,
       const VkOpaqueCaptureDescriptorDataCreateInfoEXT *descriptor_replay_info =
          vk_find_struct_const(pCreateInfo->pNext, OPAQUE_CAPTURE_DESCRIPTOR_DATA_CREATE_INFO_EXT);
       if (descriptor_replay_info && descriptor_replay_info->opaqueCaptureDescriptorData) {
-         client_address = *(const uint64_t *) descriptor_replay_info->opaqueCaptureDescriptorData;
+         client_address = *static_cast<const uint64_t *>(descriptor_replay_info->opaqueCaptureDescriptorData);
          flags |= TU_SPARSE_VMA_REPLAYABLE;
       }
 
@@ -142,7 +142,7 @@ tu_GetDeviceBufferMemoryRequirements(
       switch (sType) {
       case VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS: {
          VkMemoryDedicatedRequirements *req =
-            (VkMemoryDedicatedRequirements *) ext;
+            static_cast<VkMemoryDedicatedRequirements *>(ext);
          req->requiresDedicatedAllocation = false;
          req->prefersDedicatedAllocation = req->requiresDedicatedAllocation;
          break;
@@ -253,9 +253,14 @@ tu_GetBufferOpaqueCaptureDescriptorDataEXT(VkDevice device,
 {
    VK_FROM_HANDLE(tu_buffer, buffer, pInfo->buffer);
 
-   /* Save the buffer iova so that when replaying sparse buffers have a
-    * consistent iova and therefore consistent descriptor contents.
-    */
-   memcpy(pData, &buffer->vk.device_address, sizeof(buffer->vk.device_address));
+   if (buffer->vk.create_flags & VK_BUFFER_CREATE_SPARSE_BINDING_BIT) {
+      /* Save the buffer iova so that when replaying sparse buffers have a
+       * consistent iova and therefore consistent descriptor contents.
+       */
+      memcpy(pData, &buffer->vk.device_address, sizeof(buffer->vk.device_address));
+   } else {
+      memset(pData, 0, sizeof(buffer->vk.device_address));
+   }
+
    return VK_SUCCESS;
 }

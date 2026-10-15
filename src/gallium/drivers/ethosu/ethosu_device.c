@@ -241,6 +241,7 @@ set_device_arch(struct ethosu_ml_device *device, bool is_u65)
       device->ofm_ublock.height = 2;
       device->ofm_ublock.depth = 8;
       device->max_concurrent_blocks = 3;
+      device->ofm_scale_bits = 32;
    } else {
       device->ifm_ublock.width = 4;
       device->ifm_ublock.height = 4;
@@ -249,6 +250,7 @@ set_device_arch(struct ethosu_ml_device *device, bool is_u65)
       device->ofm_ublock.height = 1;
       device->ofm_ublock.depth = 8;
       device->max_concurrent_blocks = 7;
+      device->ofm_scale_bits = 31;
    }
 }
 

@@ -32,6 +32,8 @@ struct tu_subpass_barrier {
    VkAccessFlags2 dst_access_mask;
    VkAccessFlags3KHR dst_access_mask2;
    bool incoherent_ccu_color, incoherent_ccu_depth;
+   bool non_fb_local;
+   bool read_only_input_attachments;
 };
 
 struct tu_subpass_attachment
@@ -112,18 +114,13 @@ struct tu_render_pass_attachment
     * this attachment. Clear values must be remapped to this attachment.
     */
    uint32_t remapped_clear_att;
-   /* For driver-internal attachments, the original user attachment which it
-    * is resolved/unresolved to.
+   /* For internal attachments created for MSRTSS, the original user attachment
+    * which it is resolved/unresolved to.
     */
    uint32_t user_att;
-   /* VkExternalFormatANDROID::externalFormat for an external resolve
-    * destination, otherwise zero.
-    */
-   uint64_t external_format;
    bool load;
    bool store;
    bool gmem;
-   bool external_format_resolve;
    int32_t gmem_offset[TU_GMEM_LAYOUT_COUNT];
    bool will_be_resolved;
    /* for D32S8 separate stencil: */
@@ -167,8 +164,6 @@ struct tu_render_pass
    bool allow_ib2_skipping;
    bool has_layered_fdm;
    bool has_msrtss;
-   bool has_external_format_resolve;
-   bool has_direct_external_format_resolve;
 
    bool warn_fdm_force_disabled;
 

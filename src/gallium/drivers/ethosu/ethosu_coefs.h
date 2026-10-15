@@ -21,6 +21,6 @@ fill_coefs(struct ethosu_subgraph *subgraph,
 void
 fill_lut(struct ethosu_subgraph *subgraph,
          struct ethosu_operation *operation,
-         void *lut);
+         void *lut, unsigned size);
 
 #endif /* ETHOSU_COEFS_H */

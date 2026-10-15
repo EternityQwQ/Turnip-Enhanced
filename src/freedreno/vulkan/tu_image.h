@@ -15,6 +15,8 @@
 #include "fdl/freedreno_lrz_layout.h"
 #include "tu_knl.h"
 
+#define TU_MAX_PLANE_COUNT 3
+
 struct tu_image
 {
    struct vk_image vk;
@@ -22,11 +24,6 @@ struct tu_image
    struct fdl_layout layout[3];
    uint64_t subsampled_metadata_offset;
    uint64_t total_size;
-
-   /* The explicit gralloc allocation ends at the logical image height, so
-    * mem<->GMEM operations must not rely on FDL's usual four-row padding.
-    */
-   bool android_external_no_gmem_padding;
 
    /* Set when bound */
    uint64_t iova;
@@ -73,14 +70,11 @@ enum tu_image_id_mode {
 
 #define TU_IMAGE_ID_INTERNAL_ID UINT64_MAX
 
-struct vk_android_modifier_plane_layout;
-
 template <chip CHIP>
 VkResult
 tu_image_init(struct tu_device *device, struct tu_image *image,
               const VkImageCreateInfo *pCreateInfo, uint64_t modifier,
               const VkSubresourceLayout *plane_layouts,
-              const struct vk_android_modifier_plane_layout *modifier_plane_layouts,
               enum tu_image_id_mode id_mode);
 
 struct tu_image_view
@@ -90,8 +84,7 @@ struct tu_image_view
    struct tu_image *image; /**< VkImageViewCreateInfo::image */
 
    struct fdl6_view view;
-   struct fdl6_view view_ds_other_aspect;
-   bool has_software_ycbcr;
+   struct fdl6_view view_ds_other_aspect; /* for d32s8 separate depth/stencil */
 
    struct fdl6_view *view_depth;
    struct fdl6_view *view_stencil;

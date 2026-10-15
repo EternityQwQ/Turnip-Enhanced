@@ -45,7 +45,6 @@ fdl6_format_swiz(enum pipe_format format, bool has_z24uint_s8uint,
    case PIPE_FORMAT_B8G8_R8G8_UNORM:
    case PIPE_FORMAT_G8_B8R8_420_UNORM:
    case PIPE_FORMAT_G8_B8_R8_420_UNORM:
-   case PIPE_FORMAT_X6G10_X6B10X6R10_420_UNORM:
       /* These formats are currently only used for Vulkan, and border colors
        * aren't allowed on these formats in Vulkan because, from the
        * description of VkImageViewCreateInfo:
@@ -396,16 +395,6 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
 
          if (ubwc_enabled) {
             descriptor[4] |= A8XX_TEX_MEMOBJ_4_FLAG;
-            /* Multi-planar descriptors replace the single-plane flag-buffer
-             * address with per-plane combined metadata+data bases, but the
-             * UBWC metadata row pitch stays a required field for both
-             * planes (a8xx_descriptors.xml marks it DESC_MULTI_PLANE).
-             * NV12-family planes derive the second plane's metadata pitch
-             * from the first one, so the plane-0 pitch is sufficient.
-             * Leaving it zero makes UBWC decode of imported video planes
-             * read garbage metadata on A8XX.
-             */
-            descriptor[5] |= A8XX_TEX_MEMOBJ_5_FLAG_BUFFER_PITCH(ubwc_pitch);
          }
 
          descriptor[4] |= A8XX_TEX_MEMOBJ_4_BASE_U_LO(base_addr[1]);

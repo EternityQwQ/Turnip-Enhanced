@@ -1075,7 +1075,7 @@ d3d12_video_encoder_update_current_encoder_config_state_av1(struct d3d12_video_e
    }
 
    // Set input format
-   DXGI_FORMAT targetFmt = d3d12_convert_pipe_video_profile_to_dxgi_format(pD3D12Enc->base.profile);
+   DXGI_FORMAT targetFmt = srcTextureDesc.Format.Format;
    if (pD3D12Enc->m_currentEncodeConfig.m_encodeFormatInfo.Format != targetFmt) {
       pD3D12Enc->m_currentEncodeConfig.m_ConfigDirtyFlags |= d3d12_video_encoder_config_dirty_flag_input_format;
 
