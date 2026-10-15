@@ -89,10 +89,6 @@ wsi_headless_surface_get_capabilities(VkIcdSurfaceBase *surface,
    if (pdevice->supported_extensions.EXT_attachment_feedback_loop_layout)
       image_usage |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
 
-   VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = vk_find_struct(caps, SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT);
-   if (surface_caps && pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
-      surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
-
    VkImageUsageFlags2CreateInfoKHR *usage2 =
       vk_find_struct(caps->pNext, IMAGE_USAGE_FLAGS_2_CREATE_INFO_KHR);
    if (usage2) {
@@ -161,6 +157,42 @@ wsi_headless_surface_get_capabilities2(VkIcdSurfaceBase *surface,
          wait->presentTimingSupported = VK_FALSE;
          wait->presentAtAbsoluteTimeSupported = VK_FALSE;
          wait->presentAtRelativeTimeSupported = VK_FALSE;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_SWAPCHAIN_FLAGS_SURFACE_CAPABILITIES_EXT: {
+         VkSwapchainFlagsSurfaceCapabilitiesEXT *surface_caps = ext;
+         VK_FROM_HANDLE(vk_physical_device, pdevice, wsi_device->pdevice);
+
+         if (pdevice->supported_extensions.EXT_multisampled_render_to_swapchain)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_bind_memory2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_SPLIT_INSTANCE_BIND_REGIONS_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_id2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_present_wait2)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR;
+         if (pdevice->supported_extensions.KHR_swapchain_mutable_format)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
+         if (pdevice->supported_extensions.EXT_present_timing)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+         if (pdevice->supported_extensions.KHR_swapchain_maintenance1 ||
+             pdevice->supported_extensions.EXT_swapchain_maintenance1)
+            surface_caps->swapchainSupportedFlags |= VK_SWAPCHAIN_CREATE_DEFERRED_MEMORY_ALLOCATION_BIT_EXT;
+      }
+      break;
+
+      case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_ID_2_KHR: {
+         VkSurfaceCapabilitiesPresentId2KHR *pid2 = ext;
+
+         pid2->presentId2Supported = VK_TRUE;
+         break;
+      }
+
+      case VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_PRESENT_WAIT_2_KHR: {
+         VkSurfaceCapabilitiesPresentWait2KHR *pwait2 = ext;
+
+         pwait2->presentWait2Supported = VK_TRUE;
          break;
       }
 
@@ -521,6 +553,7 @@ wsi_headless_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.release_images = wsi_headless_swapchain_release_images;
    chain->base.queue_present = wsi_headless_swapchain_queue_present;
    chain->base.wait_for_present = wsi_headless_swapchain_wait_for_present;
+   chain->base.wait_for_present2 = wsi_headless_swapchain_wait_for_present;
    chain->base.present_mode = wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
    chain->base.image_count = num_images;
 

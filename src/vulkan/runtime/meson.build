@@ -25,6 +25,7 @@ vulkan_lite_runtime_files = files(
   'vk_device_memory.c',
   'vk_fence.c',
   'vk_framebuffer.c',
+  'vk_frame_pacer.c',
   'vk_graphics_state.c',
   'vk_image.c',
   'vk_log.c',
@@ -243,14 +244,14 @@ idep_vulkan_lite_runtime_headers = declare_dependency(
 if get_option('backend').startswith('vs')
   idep_vulkan_lite_runtime = declare_dependency(
     link_with : [libvulkan_lite_runtime, libvulkan_lite_instance],
-    dependencies : idep_vulkan_lite_runtime_headers
+    dependencies : [idep_vulkan_lite_runtime_headers, vulkan_lite_runtime_deps]
   )
 else
   idep_vulkan_lite_runtime = declare_dependency(
     # Instruct users of this library to link with --whole-archive.  Otherwise,
     # our weak function overloads may not resolve properly.
     link_whole : [libvulkan_lite_runtime, libvulkan_lite_instance],
-    dependencies : idep_vulkan_lite_runtime_headers
+    dependencies : [idep_vulkan_lite_runtime_headers, vulkan_lite_runtime_deps]
   )
 endif
 
@@ -318,10 +319,12 @@ libvulkan_instance = static_library(
 if get_option('backend').startswith('vs')
   idep_vulkan_runtime_body = declare_dependency(
     link_with : [libvulkan_lite_runtime, libvulkan_runtime, libvulkan_instance],
+    dependencies : vulkan_runtime_deps,
   )
 else
   idep_vulkan_runtime_body = declare_dependency(
     link_whole : [libvulkan_lite_runtime, libvulkan_runtime, libvulkan_instance],
+    dependencies : vulkan_runtime_deps,
   )
 endif
 

@@ -1,6 +1,7 @@
 /*
  * Copyright © 2026 NXP
  * Copyright © 2022 Intel Corporation
+ * Copyright © 2026 Google LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -67,26 +68,6 @@ vk_android_get_ugralloc(void)
    static once_flag once = ONCE_FLAG_INIT;
    call_once(&once, vk_android_init_ugralloc_once);
    return _gralloc;
-}
-
-bool
-vk_android_gralloc_supports_explicit_yuv_layout(void)
-{
-   struct u_gralloc *gralloc = vk_android_get_ugralloc();
-
-   return gralloc &&
-          (u_gralloc_get_capabilities(gralloc) &
-           U_GRALLOC_CAP_EXPLICIT_YUV_LAYOUT);
-}
-
-bool
-vk_android_gralloc_supports_qcom_swapchain_ubwc(void)
-{
-   struct u_gralloc *gralloc = vk_android_get_ugralloc();
-
-   return gralloc &&
-          (u_gralloc_get_capabilities(gralloc) &
-           U_GRALLOC_CAP_QCOM_SWAPCHAIN_UBWC);
 }
 
 static int vk_android_hal_open(const struct hw_module_t *mod, const char *id,
@@ -160,9 +141,7 @@ static VkResult
 vk_gralloc_to_drm_explicit_layout(
    struct u_gralloc_buffer_handle *in_hnd,
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts,
-   struct vk_android_modifier_plane_layout *out_modifier_plane_layouts,
-   int max_planes)
+   VkSubresourceLayout *out_layouts, int max_planes)
 {
    struct u_gralloc_buffer_basic_info info;
    struct u_gralloc *u_gralloc = vk_android_get_ugralloc();
@@ -173,20 +152,10 @@ vk_gralloc_to_drm_explicit_layout(
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
 
-   if (info.num_planes <= 0) {
-      mesa_loge("info.num_planes(%d) <= 0 unsupported", info.num_planes);
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   }
-
    if (info.num_planes > max_planes) {
       mesa_loge("info.num_planes(%u) > max_planes(%u) unsupported",
                 info.num_planes, max_planes);
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   }
-
-   for (int i = 0; i < info.num_planes; i++) {
-      if (info.offsets[i] < 0 || info.strides[i] <= 0)
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
 
    bool is_disjoint = false;
@@ -205,12 +174,6 @@ vk_gralloc_to_drm_explicit_layout(
 
    memset(out, 0, sizeof(*out));
    memset(out_layouts, 0, sizeof(*out_layouts) * max_planes);
-   if (out_modifier_plane_layouts) {
-      memset(out_modifier_plane_layouts, 0,
-             sizeof(*out_modifier_plane_layouts) * max_planes);
-      for (int i = 0; i < max_planes; i++)
-         out_modifier_plane_layouts[i].data_offset = UINT64_MAX;
-   }
 
    out->sType =
       VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
@@ -221,16 +184,6 @@ vk_gralloc_to_drm_explicit_layout(
    for (size_t i = 0; i < info.num_planes; i++) {
       out_layouts[i].offset = info.offsets[i];
       out_layouts[i].rowPitch = info.strides[i];
-      if (out_modifier_plane_layouts && info.has_explicit_modifier_layout) {
-         out_modifier_plane_layouts[i] =
-            (struct vk_android_modifier_plane_layout) {
-               .data_offset = info.modifier_plane_layouts[i].data_offset,
-               .data_size = info.modifier_plane_layouts[i].data_size,
-               .metadata_size = info.modifier_plane_layouts[i].metadata_size,
-               .metadata_row_pitch =
-                  info.modifier_plane_layouts[i].metadata_row_pitch,
-            };
-      }
    }
 
    /* Compute arrayPitch for multi-layer buffers. The gralloc HAL does not
@@ -245,20 +198,11 @@ vk_gralloc_to_drm_explicit_layout(
    }
 
    if (info.drm_fourcc == DRM_FORMAT_YVU420) {
-      if (info.num_planes != 3)
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-
       /* Swap the U and V planes to match the
        * VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM */
       VkSubresourceLayout tmp = out_layouts[1];
       out_layouts[1] = out_layouts[2];
       out_layouts[2] = tmp;
-      if (out_modifier_plane_layouts) {
-         struct vk_android_modifier_plane_layout modifier_plane_layout =
-            out_modifier_plane_layouts[1];
-         out_modifier_plane_layouts[1] = out_modifier_plane_layouts[2];
-         out_modifier_plane_layouts[2] = modifier_plane_layout;
-      }
    }
 
    return VK_SUCCESS;
@@ -292,7 +236,7 @@ vk_android_import_anb_memory(struct vk_device *device,
 
    uint32_t compatible_types = mem_reqs.memoryTypeBits & fd_props.memoryTypeBits;
    if (!compatible_types) {
-      mesa_loge("No compatible AHB mem types (img_reqs=%#b,fd_reqs=%#b)",
+      mesa_loge("No compatible AHB mem types (img_reqs=%#x,fd_reqs=%#x)",
                  mem_reqs.memoryTypeBits, fd_props.memoryTypeBits);
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
@@ -364,18 +308,6 @@ vk_android_get_anb_layout(
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes)
 {
-   return vk_android_get_anb_layout_with_modifier_info(
-      pCreateInfo, out, out_layouts, NULL, max_planes);
-}
-
-VkResult
-vk_android_get_anb_layout_with_modifier_info(
-   const VkImageCreateInfo *pCreateInfo,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts,
-   struct vk_android_modifier_plane_layout *out_modifier_plane_layouts,
-   int max_planes)
-{
    const VkNativeBufferANDROID *native_buffer =
       vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
 
@@ -383,15 +315,10 @@ vk_android_get_anb_layout_with_modifier_info(
       .handle = native_buffer->handle,
       .hal_format = native_buffer->format,
       .pixel_stride = native_buffer->stride,
-      .width = pCreateInfo->extent.width,
-      .height = pCreateInfo->extent.height,
-      .layer_count = pCreateInfo->arrayLayers,
-      .usage = native_buffer->usage3,
-      .has_usage = true,
    };
 
-   return vk_gralloc_to_drm_explicit_layout(
-      &gr_handle, out, out_layouts, out_modifier_plane_layouts, max_planes);
+   return vk_gralloc_to_drm_explicit_layout(&gr_handle, out,
+                                            out_layouts, max_planes);
 }
 
 VkResult
@@ -745,18 +672,6 @@ vk_android_get_ahb_layout(
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes)
 {
-   return vk_android_get_ahb_layout_with_modifier_info(
-      ahardware_buffer, out, out_layouts, NULL, max_planes);
-}
-
-VkResult
-vk_android_get_ahb_layout_with_modifier_info(
-   struct AHardwareBuffer *ahardware_buffer,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts,
-   struct vk_android_modifier_plane_layout *out_modifier_plane_layouts,
-   int max_planes)
-{
    AHardwareBuffer_Desc description;
    const native_handle_t *handle =
       AHardwareBuffer_getNativeHandle(ahardware_buffer);
@@ -767,15 +682,10 @@ vk_android_get_ahb_layout_with_modifier_info(
       .handle = handle,
       .pixel_stride = description.stride,
       .hal_format = description.format,
-      .width = description.width,
-      .height = description.height,
-      .layer_count = description.layers,
-      .usage = description.usage,
-      .has_usage = true,
    };
 
-   return vk_gralloc_to_drm_explicit_layout(
-      &gr_handle, out, out_layouts, out_modifier_plane_layouts, max_planes);
+   return vk_gralloc_to_drm_explicit_layout(&gr_handle, out,
+                                            out_layouts, max_planes);
 }
 
 /* From the Android hardware_buffer.h header:
@@ -834,6 +744,12 @@ vk_ahb_format_to_image_format(uint32_t ahb_format)
 #endif
    case AHARDWAREBUFFER_FORMAT_Y8:
       return VK_FORMAT_R8_UNORM;
+#if ANDROID_API_LEVEL >= 34
+   case AHARDWAREBUFFER_FORMAT_R16_UINT:
+      return VK_FORMAT_R16_UINT;
+   case AHARDWAREBUFFER_FORMAT_R16G16_UINT:
+      return VK_FORMAT_R16G16_UINT;
+#endif
    case AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM:
       return VK_FORMAT_B8G8R8A8_UNORM;
    default:
@@ -877,11 +793,38 @@ vk_image_format_to_ahb_format(VkFormat vk_format)
    case VK_FORMAT_R8_UNORM:
       return AHARDWAREBUFFER_FORMAT_R8_UNORM;
 #endif
+#if ANDROID_API_LEVEL >= 34
+   case VK_FORMAT_R16_UINT:
+      return AHARDWAREBUFFER_FORMAT_R16_UINT;
+   case VK_FORMAT_R16G16_UINT:
+      return AHARDWAREBUFFER_FORMAT_R16G16_UINT;
+#endif
    case VK_FORMAT_B8G8R8A8_UNORM:
       return AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
    default:
       return 0;
    }
+}
+
+VkFormat
+vk_external_format_to_efr_format(VkFormat external_format)
+{
+   /* passthrough for RGB formats */
+   if (!vk_format_get_ycbcr_info(external_format))
+      return external_format;
+
+   switch (external_format) {
+   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
+   case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
+      return VK_FORMAT_R8G8B8A8_UNORM;
+   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
+      return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+   default:
+      break;
+   }
+
+   /* no support beyond the potentially required YUV formats */
+   return VK_FORMAT_UNDEFINED;
 }
 
 /* Construct ahw usage mask from image usage bits, see
@@ -1157,11 +1100,6 @@ get_ahb_buffer_format_properties2(
       .handle = AHardwareBuffer_getNativeHandle(buffer),
       .pixel_stride = desc.stride,
       .hal_format = desc.format,
-      .width = desc.width,
-      .height = desc.height,
-      .layer_count = desc.layers,
-      .usage = desc.usage,
-      .has_usage = true,
    };
 
    struct u_gralloc_buffer_basic_info info;
@@ -1178,14 +1116,6 @@ get_ahb_buffer_format_properties2(
       break;
    case DRM_FORMAT_NV12:
       external_format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-      break;
-   case DRM_FORMAT_NV21:
-      /* Vulkan has no native VU two-plane format.  Reuse the NV12 plane
-       * representation and swap Cb/Cr through the conversion component map.
-       */
-      external_format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-      p->samplerYcbcrConversionComponents.r = VK_COMPONENT_SWIZZLE_B;
-      p->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_R;
       break;
    case DRM_FORMAT_P010:
       external_format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
@@ -1309,40 +1239,15 @@ vk_common_GetAndroidHardwareBufferPropertiesANDROID(
    }
 
    if (format_resolve) {
-      const bool identity_components =
-         format_prop2->samplerYcbcrConversionComponents.r ==
-            VK_COMPONENT_SWIZZLE_IDENTITY &&
-         format_prop2->samplerYcbcrConversionComponents.g ==
-            VK_COMPONENT_SWIZZLE_IDENTITY &&
-         format_prop2->samplerYcbcrConversionComponents.b ==
-            VK_COMPONENT_SWIZZLE_IDENTITY &&
-         format_prop2->samplerYcbcrConversionComponents.a ==
-            VK_COMPONENT_SWIZZLE_IDENTITY;
+      assert(format_prop2->externalFormat != VK_FORMAT_UNDEFINED);
+      format_resolve->colorAttachmentFormat =
+         vk_external_format_to_efr_format((VkFormat)format_prop2->externalFormat);
 
-      /* The common resolve contract currently writes the canonical external
-       * format component order.  A swizzled external format such as NV21 is
-       * valid for sampling, but must not advertise resolve until a driver can
-       * apply that swizzle while writing the destination planes.
-       */
-      if (device->enabled_extensions.ANDROID_external_format_resolve &&
-          identity_components) {
-         assert(format_prop2->externalFormat != VK_FORMAT_UNDEFINED);
-         /* Multiplanar format descriptions do not model conventional RGBA
-          * component indices.  Querying component 1 would therefore
-          * misclassify 8-bit NV12 as a higher-bit-depth format.
-          */
-         const uint32_t bpc =
-            vk_format_get_bpc(format_prop2->externalFormat);
-         format_resolve->colorAttachmentFormat =
-            bpc == 8 ? VK_FORMAT_R8G8B8A8_UNORM
-                     : VK_FORMAT_R16G16B16A16_UNORM;
-
+      if (format_resolve->colorAttachmentFormat != VK_FORMAT_UNDEFINED) {
          format_prop2->formatFeatures |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
          if (format_prop) {
             format_prop->formatFeatures |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
          }
-      } else {
-         format_resolve->colorAttachmentFormat = VK_FORMAT_UNDEFINED;
       }
    }
 
@@ -1460,34 +1365,185 @@ vk_android_get_ahb_buffer_properties(
    };
 }
 
-uint64_t
-vk_android_rp_attachment_external_format(
-   const VkAttachmentDescription2 *desc)
-{
-   const VkExternalFormatANDROID *format_info =
-      vk_find_struct_const(desc->pNext,
-                           EXTERNAL_FORMAT_ANDROID);
-   return desc->format == VK_FORMAT_UNDEFINED && format_info
-      ? format_info->externalFormat : 0;
-}
-
 bool
 vk_android_rp_attachment_has_external_format(
    const VkAttachmentDescription2 *desc)
 {
-   return vk_android_rp_attachment_external_format(desc) != 0;
+   return desc->format == VK_FORMAT_UNDEFINED &&
+          vk_android_get_external_format(desc->pNext) != VK_FORMAT_UNDEFINED;
+}
+
+VkFormat
+vk_android_get_external_format(const void *pnext)
+{
+   const VkExternalFormatANDROID *info =
+      vk_find_struct_const(pnext, EXTERNAL_FORMAT_ANDROID);
+   return info ? (VkFormat)info->externalFormat : VK_FORMAT_UNDEFINED;
+}
+
+static bool
+subpass_uses_efr(const VkRenderPassCreateInfo2 *info, uint32_t s)
+{
+   const VkSubpassDescription2 *subpass = &info->pSubpasses[s];
+   if (!subpass->pResolveAttachments || subpass->colorAttachmentCount != 1)
+      return false;
+
+   const VkAttachmentReference2 *resolve_ref =
+      &subpass->pResolveAttachments[0];
+   return resolve_ref->attachment != VK_ATTACHMENT_UNUSED &&
+          vk_android_rp_attachment_has_external_format(
+             &info->pAttachments[resolve_ref->attachment]);
 }
 
 bool
-vk_android_rp_attachment_has_only_external_format(
-   const VkAttachmentDescription2 *desc)
+vk_android_is_efr_rp(struct vk_device *device,
+                     const VkRenderPassCreateInfo2 *info)
 {
-   const VkExternalFormatANDROID *format_info =
-      vk_find_struct_const(desc->pNext,
-                           EXTERNAL_FORMAT_ANDROID);
-   return desc->format == VK_FORMAT_UNDEFINED && format_info &&
-          desc->pNext == format_info && format_info->pNext == NULL &&
-          format_info->externalFormat != 0;
+   const struct vk_properties *props = &device->physical->properties;
+   if (props->nullColorAttachmentWithExternalFormatResolve != VK_TRUE)
+      return false;
+
+   for (uint32_t s = 0; s < info->subpassCount; s++) {
+      if (subpass_uses_efr(info, s))
+         return true;
+   }
+
+   return false;
+}
+
+VkResult
+vk_android_create_efr_rp(struct vk_device *device,
+                         const VkRenderPassCreateInfo2 *info,
+                         const VkAllocationCallbacks *alloc,
+                         VkRenderPass *out_rp_handle)
+{
+   uint32_t efr_subpass_count = 0;
+   for (uint32_t s = 0; s < info->subpassCount; s++) {
+      if (subpass_uses_efr(info, s))
+         efr_subpass_count++;
+   }
+
+   STACK_ARRAY(VkAttachmentDescription2, attachments, info->attachmentCount);
+   STACK_ARRAY(VkSubpassDescription2, subpasses, info->subpassCount);
+   STACK_ARRAY(VkAttachmentReference2, color_refs, efr_subpass_count);
+
+   VkRenderPassCreateInfo2 local_info = *info;
+   local_info.pAttachments = attachments;
+   local_info.pSubpasses = subpasses;
+
+   typed_memcpy(attachments, info->pAttachments, info->attachmentCount);
+   for (uint32_t a = 0; a < info->attachmentCount; a++) {
+      VkAttachmentDescription2 *att = &attachments[a];
+      if (vk_android_rp_attachment_has_external_format(att)) {
+         VkFormat external_format = vk_android_get_external_format(att->pNext);
+         att->format = vk_external_format_to_efr_format(external_format);
+      }
+   }
+
+   VkAttachmentReference2 *color_ref_ptr = color_refs;
+
+   typed_memcpy(subpasses, info->pSubpasses, info->subpassCount);
+   for (uint32_t s = 0; s < info->subpassCount; s++) {
+      if (!subpass_uses_efr(info, s))
+         continue;
+
+      VkSubpassDescription2 *subpass = &subpasses[s];
+      assert(subpass->colorAttachmentCount == 1);
+      assert(subpass->pResolveAttachments);
+
+      *color_ref_ptr = subpass->pResolveAttachments[0];
+      subpass->pColorAttachments = color_ref_ptr++;
+      subpass->pResolveAttachments = NULL;
+   }
+
+   VkResult result = device->dispatch_table.CreateRenderPass2(
+      vk_device_to_handle(device), &local_info, alloc, out_rp_handle);
+
+   STACK_ARRAY_FINISH(attachments);
+   STACK_ARRAY_FINISH(subpasses);
+   STACK_ARRAY_FINISH(color_refs);
+
+   return result;
+}
+
+bool
+vk_android_is_efr_rendering_info(const VkRenderingInfo *info)
+{
+   /* implies nullColorAttachmentWithExternalFormatResolve == VK_TRUE */
+   assert(info);
+   return info->colorAttachmentCount == 1 &&
+          info->pColorAttachments[0].imageView == VK_NULL_HANDLE &&
+          info->pColorAttachments[0].resolveMode ==
+             VK_RESOLVE_MODE_EXTERNAL_FORMAT_DOWNSAMPLE_BIT_ANDROID;
+}
+
+const VkRenderingInfo *
+vk_android_get_efr_rendering_info(const VkRenderingInfo *info,
+                                  VkRenderingInfo *local_info,
+                                  VkRenderingAttachmentInfo *local_color_att)
+{
+   *local_color_att = info->pColorAttachments[0];
+   local_color_att->imageView = local_color_att->resolveImageView;
+   local_color_att->imageLayout = local_color_att->resolveImageLayout;
+   local_color_att->resolveImageView = VK_NULL_HANDLE;
+   local_color_att->resolveMode = VK_RESOLVE_MODE_NONE;
+
+   *local_info = *info;
+   local_info->pColorAttachments = local_color_att;
+   return local_info;
+}
+
+bool
+vk_android_is_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info)
+{
+   /* implies nullColorAttachmentWithExternalFormatResolve == VK_TRUE */
+   assert(info && r_info);
+   return r_info->colorAttachmentCount == 1 &&
+          r_info->pColorAttachmentFormats[0] == VK_FORMAT_UNDEFINED &&
+          vk_android_get_external_format(info->pNext) != VK_FORMAT_UNDEFINED;
+}
+
+const VkCommandBufferInheritanceRenderingInfo *
+vk_android_get_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info,
+   VkCommandBufferInheritanceRenderingInfo *local_info,
+   VkFormat *local_color_format)
+{
+   VkFormat external_format = vk_android_get_external_format(info->pNext);
+   *local_color_format = vk_external_format_to_efr_format(external_format);
+   *local_info = *r_info;
+   local_info->pColorAttachmentFormats = local_color_format;
+   return local_info;
+}
+
+bool
+vk_android_is_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info)
+{
+   /* implies nullColorAttachmentWithExternalFormatResolve == VK_TRUE */
+   assert(info && r_info);
+   return r_info->colorAttachmentCount == 1 &&
+          r_info->pColorAttachmentFormats[0] == VK_FORMAT_UNDEFINED &&
+          vk_android_get_external_format(info->pNext) != VK_FORMAT_UNDEFINED;
+}
+
+const VkPipelineRenderingCreateInfo *
+vk_android_get_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info,
+   VkPipelineRenderingCreateInfo *local_info,
+   VkFormat *local_color_format)
+{
+   VkFormat external_format = vk_android_get_external_format(info->pNext);
+   *local_color_format = vk_external_format_to_efr_format(external_format);
+
+   *local_info = *r_info;
+   local_info->pColorAttachmentFormats = local_color_format;
+   return local_info;
 }
 
 #endif /* ANDROID_API_LEVEL >= 26 */

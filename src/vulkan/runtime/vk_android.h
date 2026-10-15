@@ -1,5 +1,6 @@
 /*
  * Copyright © 2023 Collabora, Ltd.
+ * Copyright © 2026 Google LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -38,20 +39,9 @@ struct u_gralloc;
 struct vk_device;
 struct vk_image;
 
-struct vk_android_modifier_plane_layout {
-   uint64_t data_offset;
-   uint64_t data_size;
-   uint64_t metadata_size;
-   uint32_t metadata_row_pitch;
-};
-
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
 
 struct u_gralloc *vk_android_get_ugralloc(void);
-
-bool vk_android_gralloc_supports_explicit_yuv_layout(void);
-
-bool vk_android_gralloc_supports_qcom_swapchain_ubwc(void);
 
 VkResult vk_android_import_anb(struct vk_device *device,
                                const VkImageCreateInfo *pCreateInfo,
@@ -68,13 +58,6 @@ VkResult vk_android_get_anb_layout(
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes);
 
-VkResult vk_android_get_anb_layout_with_modifier_info(
-   const VkImageCreateInfo *pCreateInfo,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts,
-   struct vk_android_modifier_plane_layout *out_modifier_plane_layouts,
-   int max_planes);
-
 VkResult vk_android_init_deferred_image(struct vk_device *device,
                                         struct vk_image *image,
                                         const VkImageCreateInfo *pCreateInfo,
@@ -86,18 +69,6 @@ static inline struct u_gralloc *
 vk_android_get_ugralloc(void)
 {
    return NULL;
-}
-
-static inline bool
-vk_android_gralloc_supports_explicit_yuv_layout(void)
-{
-   return false;
-}
-
-static inline bool
-vk_android_gralloc_supports_qcom_swapchain_ubwc(void)
-{
-   return false;
 }
 
 static inline VkResult
@@ -114,17 +85,6 @@ vk_android_get_anb_layout(
    const VkImageCreateInfo *pCreateInfo,
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes)
-{
-   return VK_ERROR_FEATURE_NOT_PRESENT;
-}
-
-static inline VkResult
-vk_android_get_anb_layout_with_modifier_info(
-   const VkImageCreateInfo *pCreateInfo,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts,
-   struct vk_android_modifier_plane_layout *out_modifier_plane_layouts,
-   int max_planes)
 {
    return VK_ERROR_FEATURE_NOT_PRESENT;
 }
@@ -150,6 +110,8 @@ VkFormat vk_ahb_format_to_image_format(uint32_t ahb_format);
 
 uint32_t vk_image_format_to_ahb_format(VkFormat vk_format);
 
+VkFormat vk_external_format_to_efr_format(VkFormat external_format);
+
 uint64_t vk_image_usage_to_ahb_usage(const VkImageCreateFlags2KHR vk_create,
                                      const VkImageUsageFlags2KHR vk_usage);
 
@@ -160,13 +122,6 @@ VkResult vk_android_get_ahb_layout(
    struct AHardwareBuffer *ahardware_buffer,
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes);
-
-VkResult vk_android_get_ahb_layout_with_modifier_info(
-   struct AHardwareBuffer *ahardware_buffer,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts,
-   struct vk_android_modifier_plane_layout *out_modifier_plane_layouts,
-   int max_planes);
 
 VkResult vk_android_get_ahb_image_properties(
    VkPhysicalDevice pdev_handle,
@@ -181,11 +136,44 @@ void vk_android_get_ahb_buffer_properties(
 bool vk_android_rp_attachment_has_external_format(
    const VkAttachmentDescription2 *desc);
 
-bool vk_android_rp_attachment_has_only_external_format(
-   const VkAttachmentDescription2 *desc);
+VkFormat vk_android_get_external_format(const void *pnext);
 
-uint64_t vk_android_rp_attachment_external_format(
-   const VkAttachmentDescription2 *desc);
+bool vk_android_is_efr_rp(struct vk_device *device,
+                          const VkRenderPassCreateInfo2 *info);
+
+VkResult vk_android_create_efr_rp(struct vk_device *device,
+                                  const VkRenderPassCreateInfo2 *info,
+                                  const VkAllocationCallbacks *alloc,
+                                  VkRenderPass *out_rp_handle);
+
+bool vk_android_is_efr_rendering_info(const VkRenderingInfo *info);
+
+const VkRenderingInfo *vk_android_get_efr_rendering_info(
+   const VkRenderingInfo *info,
+   VkRenderingInfo *local_info,
+   VkRenderingAttachmentInfo *local_color_att);
+
+bool vk_android_is_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info);
+
+const VkCommandBufferInheritanceRenderingInfo *
+vk_android_get_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info,
+   VkCommandBufferInheritanceRenderingInfo *local_info,
+   VkFormat *local_color_format);
+
+bool vk_android_is_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info);
+
+const VkPipelineRenderingCreateInfo *
+vk_android_get_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info,
+   VkPipelineRenderingCreateInfo *local_info,
+   VkFormat *local_color_format);
 
 #else /* defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 26 */
 
@@ -205,6 +193,12 @@ static inline uint32_t
 vk_image_format_to_ahb_format(VkFormat vk_format)
 {
    return 0;
+}
+
+static inline VkFormat
+vk_external_format_to_efr_format(VkFormat external_format)
+{
+   return VK_FORMAT_UNDEFINED;
 }
 
 static inline uint64_t
@@ -230,17 +224,6 @@ vk_android_get_ahb_layout(
 }
 
 static inline VkResult
-vk_android_get_ahb_layout_with_modifier_info(
-   struct AHardwareBuffer *ahardware_buffer,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts,
-   struct vk_android_modifier_plane_layout *out_modifier_plane_layouts,
-   int max_planes)
-{
-   return VK_ERROR_FEATURE_NOT_PRESENT;
-}
-
-static inline VkResult
 vk_android_get_ahb_image_properties(
    VkPhysicalDevice pdev_handle,
    const VkPhysicalDeviceImageFormatInfo2 *info,
@@ -257,25 +240,83 @@ vk_android_get_ahb_buffer_properties(
 {
 }
 
-static bool
+static inline bool
 vk_android_rp_attachment_has_external_format(
    const VkAttachmentDescription2 *desc)
 {
    return false;
 }
 
+static inline VkFormat
+vk_android_get_external_format(const void *pnext)
+{
+   return VK_FORMAT_UNDEFINED;
+}
+
 static inline bool
-vk_android_rp_attachment_has_only_external_format(
-   const VkAttachmentDescription2 *desc)
+vk_android_is_efr_rp(struct vk_device *device,
+                     const VkRenderPassCreateInfo2 *info)
 {
    return false;
 }
 
-static inline uint64_t
-vk_android_rp_attachment_external_format(
-   const VkAttachmentDescription2 *desc)
+static inline VkResult
+vk_android_create_efr_rp(struct vk_device *device,
+                         const VkRenderPassCreateInfo2 *info,
+                         const VkAllocationCallbacks *alloc,
+                         VkRenderPass *out_rp_handle)
 {
-   return 0;
+   return VK_ERROR_UNKNOWN;
+}
+
+static inline bool
+vk_android_is_efr_rendering_info(const VkRenderingInfo *info)
+{
+   return false;
+}
+
+static inline const VkRenderingInfo *
+vk_android_get_efr_rendering_info(const VkRenderingInfo *info,
+                                  VkRenderingInfo *local_info,
+                                  VkRenderingAttachmentInfo *local_color_att)
+{
+   return NULL;
+}
+
+static inline bool
+vk_android_is_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info)
+{
+   return false;
+}
+
+static inline const VkCommandBufferInheritanceRenderingInfo *
+vk_android_get_efr_inheritance_rendering_info(
+   const VkCommandBufferInheritanceInfo *info,
+   const VkCommandBufferInheritanceRenderingInfo *r_info,
+   VkCommandBufferInheritanceRenderingInfo *local_info,
+   VkFormat *local_color_format)
+{
+   return NULL;
+}
+
+static inline bool
+vk_android_is_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info)
+{
+   return false;
+}
+
+static inline const VkPipelineRenderingCreateInfo *
+vk_android_get_efr_pipeline_rendering_info(
+   const VkGraphicsPipelineCreateInfo *info,
+   const VkPipelineRenderingCreateInfo *r_info,
+   VkPipelineRenderingCreateInfo *local_info,
+   VkFormat *local_color_format)
+{
+   return NULL;
 }
 
 #endif /* ANDROID_API_LEVEL >= 26 */

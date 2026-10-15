@@ -51,6 +51,10 @@ extern "C" {
 #define UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY      (1 << 0)
 #define UTIL_QUEUE_INIT_RESIZE_IF_FULL            (1 << 1)
 #define UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY  (1 << 2)
+/* Wake a thread which waits for a free slot in a full queue once the queue
+ * is half empty instead of after every job.
+ */
+#define UTIL_QUEUE_INIT_WAKE_AT_HALF_EMPTY        (1 << 3)
 
 #if UTIL_FUTEX_SUPPORTED
 #define UTIL_QUEUE_FENCE_FUTEX

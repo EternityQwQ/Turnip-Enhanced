@@ -219,13 +219,13 @@ get_frame_shader(struct panvk_device *dev,
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    struct pan_compile_inputs inputs = {
-      .gpu_id = phys_dev->kmod.dev->props.gpu_id,
-      .gpu_variant = phys_dev->kmod.dev->props.gpu_variant,
+      .arch = PAN_ARCH,
+      .model = phys_dev->model,
       .is_blit = true,
       .fau.reserved = DIV_ROUND_UP(sizeof(struct panvk_fb_sysvals), 4),
    };
 
-   pan_preprocess_nir(nir, inputs.gpu_id);
+   pan_preprocess_nir(nir, PAN_ARCH);
 
    VkResult result = panvk_per_arch(create_internal_shader)(
       dev, nir, &inputs, &shader);

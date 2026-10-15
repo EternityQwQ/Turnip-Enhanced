@@ -34,7 +34,7 @@ using android::hardware::graphics::mapper::V4_0::IMapper;
 using MetadataType =
    android::hardware::graphics::mapper::V4_0::IMapper::MetadataType;
 
-Error
+static Error
 GetMetadata(android::sp<IMapper> mapper, const native_handle_t *buffer,
             MetadataType type, hidl_vec<uint8_t> *metadata)
 {
@@ -55,7 +55,7 @@ GetMetadata(android::sp<IMapper> mapper, const native_handle_t *buffer,
    return error;
 }
 
-std::optional<std::vector<PlaneLayout>>
+static std::optional<std::vector<PlaneLayout>>
 GetPlaneLayouts(android::sp<IMapper> mapper, const native_handle_t *buffer)
 {
    hidl_vec<uint8_t> encoded_layouts;

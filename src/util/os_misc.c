@@ -194,7 +194,15 @@ os_get_android_option(const char *name)
    }
 
    /* prefixes to search sorted by preference */
-   const char *prefices[] = { "debug.", "vendor.", "" };
+   const char *prefices[] =
+   {
+      "debug.",
+      "vendor.",
+#if ANDROID_API_LEVEL < 33
+      /* Before Android T, non-prefixed sysprops were allowed */
+      "",
+#endif
+   };
    char full_key[PROP_NAME_MAX];
    int len = 0;
    for (int i = 0; i < ARRAY_SIZE(prefices); i++) {
@@ -359,7 +367,7 @@ os_set_option(const char *name, const char *value, bool override)
 bool
 os_get_total_physical_memory(uint64_t *size)
 {
-#if HAVE_SYSCONF
+#if HAVE_SYSCONF && HAVE_SC_PHYS_PAGES
    const long phys_pages = sysconf(_SC_PHYS_PAGES);
    const long page_size = sysconf(_SC_PAGESIZE);
 

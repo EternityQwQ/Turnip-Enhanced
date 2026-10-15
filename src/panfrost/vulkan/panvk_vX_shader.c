@@ -318,10 +318,6 @@ mark_all_access_non_uniform(nir_builder *b, nir_instr *instr, void *data)
             tex->sampler_non_uniform = true;
             break;
 
-         case nir_tex_src_offset:
-            tex->offset_non_uniform = true;
-            break;
-
          default:
             break;
          }
@@ -503,7 +499,7 @@ panvk_preprocess_nir(struct vk_physical_device *vk_pdev,
    NIR_PASS(_, nir, nir_inline_sysval, nir_intrinsic_load_core_max_id_arm,
             core_max_id);
 
-   pan_preprocess_nir(nir, pdev->kmod.dev->props.gpu_id);
+   pan_preprocess_nir(nir, PAN_ARCH);
 }
 
 static void
@@ -1073,8 +1069,10 @@ panvk_compile_nir(struct panvk_device *dev, nir_shader *nir,
          struct u_memstream mem;
          if (u_memstream_open(&mem, &data, &disasm_size)) {
             FILE *const stream = u_memstream_get(&mem);
+            struct panvk_physical_device *phys_dev =
+               to_panvk_physical_device(dev->vk.physical);
             pan_disassemble(stream, shader->bin_ptr, shader->bin_size,
-                            compile_input->gpu_id, false);
+                            phys_dev->kmod.dev->props.gpu_id, false);
             if (nir->constant_data_size) {
                fprintf(stream, "constant data (%u bytes):\n",
                        nir->constant_data_size);
@@ -1421,8 +1419,8 @@ panvk_compile_shader(struct panvk_device *dev,
       robust_modes |= nir_var_mem_ssbo;
 
    struct pan_compile_inputs inputs = {
-      .gpu_id = phys_dev->kmod.dev->props.gpu_id,
-      .gpu_variant = phys_dev->kmod.dev->props.gpu_variant,
+      .arch = PAN_ARCH,
+      .model = phys_dev->model,
       .view_mask = (state && state->rp) ? state->mv->view_mask : 0,
       .robust_modes = robust_modes,
       .robust_descriptors = dev->vk.enabled_features.nullDescriptor,
@@ -1486,9 +1484,8 @@ panvk_compile_shader(struct panvk_device *dev,
 
          struct pan_varying_layout varying_layout;
          if (v == PANVK_VS_VARIANT_HW) {
-            pan_varying_collect_formats(&varying_layout, nir, inputs.gpu_id);
-            pan_build_varying_layout_compact(&varying_layout, nir,
-                                             inputs.gpu_id);
+            pan_varying_collect_formats(&varying_layout, nir, PAN_ARCH);
+            pan_build_varying_layout_compact(&varying_layout, nir, PAN_ARCH);
             inputs.varying_layout = &varying_layout;
          }
 
@@ -1795,10 +1792,16 @@ shader_desc_info_deserialize(struct panvk_device *dev,
 
 #if PAN_ARCH < 9
    shader->desc_info.dyn_ubos.count = blob_read_uint32(blob);
+   if (shader->desc_info.dyn_ubos.count >
+       ARRAY_SIZE(shader->desc_info.dyn_ubos.map))
+      return panvk_error(shader, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
    blob_copy_bytes(blob, shader->desc_info.dyn_ubos.map,
                    sizeof(*shader->desc_info.dyn_ubos.map) *
                       shader->desc_info.dyn_ubos.count);
    shader->desc_info.dyn_ssbos.count = blob_read_uint32(blob);
+   if (shader->desc_info.dyn_ssbos.count >
+       ARRAY_SIZE(shader->desc_info.dyn_ssbos.map))
+      return panvk_error(shader, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
    blob_copy_bytes(blob, shader->desc_info.dyn_ssbos.map,
                    sizeof(*shader->desc_info.dyn_ssbos.map) *
                       shader->desc_info.dyn_ssbos.count);
@@ -1806,6 +1809,8 @@ shader_desc_info_deserialize(struct panvk_device *dev,
    uint32_t others_count = 0;
    for (unsigned i = 0; i < ARRAY_SIZE(shader->desc_info.others.count); i++) {
       shader->desc_info.others.count[i] = blob_read_uint32(blob);
+      if (shader->desc_info.others.count[i] > UINT32_MAX - others_count)
+         return panvk_error(shader, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       others_count += shader->desc_info.others.count[i];
    }
 
@@ -1826,6 +1831,9 @@ shader_desc_info_deserialize(struct panvk_device *dev,
    }
 #else
    shader->desc_info.dyn_bufs.count = blob_read_uint32(blob);
+   if (shader->desc_info.dyn_bufs.count >
+       ARRAY_SIZE(shader->desc_info.dyn_bufs.map))
+      return panvk_error(shader, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
    blob_copy_bytes(blob, shader->desc_info.dyn_bufs.map,
                    sizeof(*shader->desc_info.dyn_bufs.map) *
                       shader->desc_info.dyn_bufs.count);

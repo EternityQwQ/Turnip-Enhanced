@@ -217,7 +217,7 @@ files_drirc = files('00-mesa-defaults.conf')
 devenv.set('DRIRC_CONFIGDIR', meson.current_source_dir())
 
 foreach i : [
-  [with_amd_vk, 'src/amd/vulkan', '00-radv-defaults.conf'],
+  [with_amd_vk, 'src/amd/vulkan', ['00-radv-defaults.conf', '01-radv-performance.conf']],
   [with_intel_vk, 'src/intel/vulkan', '00-anv-defaults.conf'],
   [with_intel_hasvk, 'src/intel/vulkan_hasvk', '00-hasvk-defaults.conf'],
   [with_nouveau_vk, 'src/nouveau/vulkan', '00-nvk-defaults.conf'],
@@ -245,7 +245,9 @@ foreach i : [
 ]
   if i[0]
     driver_folder = dir_source_root / i[1]
-    files_drirc += files(driver_folder / i[2])
+    foreach f : [] + i[2]
+      files_drirc += files(driver_folder / f)
+    endforeach
     devenv.append('DRIRC_CONFIGDIR', driver_folder)
   endif
 endforeach
@@ -444,6 +446,10 @@ _libparson = static_library(
 idep_parson = declare_dependency(
   link_with :  _libparson,
 )
+
+if with_any_rust
+  subdir('rust')
+endif
 
 if with_tests
   # DRI_CONF macros use designated initializers (required for union

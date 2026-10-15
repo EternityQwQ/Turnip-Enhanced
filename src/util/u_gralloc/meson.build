@@ -22,22 +22,13 @@ if dep_android_ui.found()
   c_args_for_u_gralloc += '-DUSE_IMAPPER4_METADATA_API'
   cpp_args_for_u_gralloc += '-DUSE_IMAPPER4_METADATA_API'
   options_for_u_gralloc += 'cpp_std=c++17'
+  deps_for_u_gralloc += dep_android_ui
 elif dep_android_mapper4.found()
   files_u_gralloc += files('u_gralloc_imapper4_api.cpp')
   c_args_for_u_gralloc += '-DUSE_IMAPPER4_METADATA_API'
   cpp_args_for_u_gralloc += '-DUSE_IMAPPER4_METADATA_API'
   options_for_u_gralloc += 'cpp_std=c++17'
   deps_for_u_gralloc += dep_android_mapper4
-elif with_android_stub and get_option('platform-sdk-version') >= 30
-  # Standalone NDK builds cannot include/link Android's private Mapper4 C++
-  # interfaces.  Resolve narrow QTI gralloc/libui metadata ABIs at runtime and
-  # fail closed if the target platform does not provide the required symbols.
-  files_u_gralloc += files('u_gralloc_libui_api.cpp')
-  c_args_for_u_gralloc += '-DUSE_QTI_GRALLOC_METADATA_API'
-  cpp_args_for_u_gralloc += '-DUSE_QTI_GRALLOC_METADATA_API'
-  c_args_for_u_gralloc += '-DUSE_IMAPPER4_METADATA_API'
-  cpp_args_for_u_gralloc += '-DUSE_IMAPPER4_METADATA_API'
-  options_for_u_gralloc += 'cpp_std=c++17'
 endif
 
 if with_freedreno_vk or with_gallium_freedreno
@@ -56,4 +47,7 @@ _libmesa_u_gralloc = static_library(
   dependencies: deps_for_u_gralloc,
 )
 
-idep_u_gralloc = declare_dependency(link_with: _libmesa_u_gralloc)
+idep_u_gralloc = declare_dependency(
+  link_with: _libmesa_u_gralloc,
+  dependencies: deps_for_u_gralloc,
+)
