@@ -1,3 +1,7 @@
 test_custom_border_color_srgb,Fail
 test_byte_buffer_addressing_wrap,Fail
 test_structured_buffer_addressing_wrap,Fail
+
+# https://github.com/HansKristian-Work/vkd3d-proton/issues/3368
+test_planar_video_formats,Fail
+test_read_subresource_rt,Fail

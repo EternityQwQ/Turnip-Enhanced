@@ -65,6 +65,7 @@ mapfile -t duplicate_files < <(
     \( \
       -name '*.txt' \
       -o -name '*.toml' \
+      -o -name '*.conf' \
       -o -name '*traces*.yml' \
     \) \
     -exec basename -a {} + | sort | uniq -d
@@ -79,6 +80,7 @@ find src/ -path '*/ci/*' \
   \( \
     -name '*.txt' \
     -o -name '*.toml' \
+    -o -name '*.conf' \
     -o -name '*traces*.yml' \
   \) \
   -exec cp -p {} install/ \;

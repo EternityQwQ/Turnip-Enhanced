@@ -411,8 +411,8 @@ Core Mesa environment variables
 
 .. envvar:: MESA_VK_TRACE_PER_SUBMIT
 
-   Enables per-submit capture for compute-only workload. Disabled by default
-   and only valid with MESA_VK_TRACE=rgp.
+   Enables per-submit capture which may be helpful for compute-only workloads.
+   Disabled by default and only valid with MESA_VK_TRACE=rgp.
 
 .. envvar:: MESA_VK_TRACE_FRAME
 
@@ -472,37 +472,6 @@ that wrap calls to NIR lowering/optimizations.
 .. envvar:: NIR_SKIP
 
    a comma-separated list of optimization/lowering passes to skip.
-
-Mesa Xlib driver environment variables
---------------------------------------
-
-The following are only applicable to the Mesa Xlib software driver. See
-the :doc:`Xlib software driver page <xlibdriver>` for details.
-
-.. envvar:: MESA_RGB_VISUAL
-
-   specifies the X visual and depth for RGB mode
-
-.. envvar:: MESA_BACK_BUFFER
-
-   specifies how to implement the back color buffer, either ``pixmap``
-   or ``ximage``
-
-.. envvar:: MESA_XSYNC
-
-   enable synchronous X behavior (for debugging only)
-
-.. envvar:: MESA_GLX_FORCE_ALPHA
-
-   if set, forces RGB windows to have an alpha channel.
-
-.. envvar:: MESA_GLX_DEPTH_BITS
-
-   specifies default number of bits for depth buffer.
-
-.. envvar:: MESA_GLX_ALPHA_BITS
-
-   specifies default number of bits for alpha channel.
 
 Mesa WGL driver environment variables
 -------------------------------------
@@ -608,6 +577,8 @@ Intel driver environment variables
    ``no-resource-barrier``
       disable RENDER_BARRIER instruction usage by falling back to
       PIPE_CONTROL
+   ``no-jay``
+      disable the Jay compiler and fall back to the older brw compiler
    ``optimizer``
       dump shader assembly to files at each optimization pass and
       iteration that make progress (Gfx < 9)
@@ -630,6 +601,8 @@ Intel driver environment variables
    ``sf``
       emit messages about the strips & fans unit (for old gens, includes
       the SF program)
+   ``shader-hash``
+      emit dummy MOV instructions at the end of shaders with the shader hash
    ``soft64``
       enable implementation of software 64bit floating point support
    ``sparse``
@@ -901,6 +874,54 @@ Intel driver environment variables
 
    If none of widths for particular shader stage was specified, then all
    widths are allowed.
+
+.. envvar:: INTEL_THREADS_PER_EU_MIN
+
+   Allows the user to specify the minimum number of threads per execution unit (EU).
+   This environment variable affects brw and jay backends on Xe3+ platforms.
+   The only valid entries for this setting are integers within the range [4, 10].
+   The reason for this is that the hardware only supports specific per-thread
+   chunks in multiples of 32 (with the exception of 224 GRFs):
+
+   Supported per-thread chunk sizes::
+
+      32 | 64 | 96 | 128 | 160 | 192 | 256
+
+   Then we have the hardware constraints of 10 threads max per EU and a max size
+   of 1024 GRFs that an EU can support.
+
+   With number of threads (T), the per-thread GRF size (G) can be determined by
+   the following equation, where we are rounding down to the nearest multiple
+   of 32::
+
+      ROUND_DOWN_TO(1024 / T, 32) = G
+
+      T = 10, G = 96  (maximum threads per EU)
+      T = 9,  G = 96  (9 threads will become 10)
+      T = 8,  G = 128
+      T = 7,  G = 128 (7 threads will become 8)
+      T = 6,  G = 160
+      T = 5,  G = 192
+      T = 4,  G = 256 (minimum threads per EU)
+
+   Note that 7 and 9 threads aren't really supported either due to the per-thread
+   chunk size constraints, so the GRF sizes will round down to the nearest size
+   32 chunk, which means that 7 threads become 8, while 9 threads become 10.
+
+   Note this variable should be used with ``MESA_SHADER_CACHE_DISABLE=true`` to
+   avoid conflicting with existing shader cache entries.
+
+.. envvar:: INTEL_THREADS_PER_EU_SET
+
+   Forces a set number of threads per EU. This overrides the default number of
+   threads per EU to the specified value, including overriding :envvar:`INTEL_THREADS_PER_EU_MIN`.
+   Otherwise, this behaves exactly as :envvar:`INTEL_THREADS_PER_EU_MIN`.
+
+.. envvar:: INTEL_THREADS_PER_EU_SRCHASH
+
+   Limits the usage of :envvar:`INTEL_THREADS_PER_EU_MIN` and :envvar:`INTEL_THREADS_PER_EU_SET` to
+   a specified shader hash. Requires ``0x`` prefix in the hash value.
+   For example: ``0xFFFFFFFF``
 
 .. envvar:: MDA_OUTPUT_DIR
 
@@ -1522,7 +1543,7 @@ RADV driver environment variables
    ``syncshaders``
       synchronize shaders after all draws/dispatches
    ``zerovram``
-      initialize all memory allocated in VRAM as zero
+      initialize all memory allocated in VRAM as zero (deprecated)
    ``vs``
       Dump vertex shaders.
    ``tcs``
@@ -1635,13 +1656,15 @@ RADV driver environment variables
       enable experimental implementation of
       VK_EXT_multisampled_render_to_single_sampled
    ``sparse``
-      enable experimental sparse binding and sparse residency on GPUs where we don't support it by default (pre Polaris)
+      enable experimental sparse binding and sparse residency on GPUs where we don't support it by default (GFX6, GFX7-8 APUs)
    ``transfer_queue``
       enable experimental transfer queue support (GFX9+, not yet spec compliant)
    ``video_decode``
       enable experimental video decoding support on GFX6-9
    ``video_encode``
       enable experimental video encoding support on GFX6-9
+   ``elf``
+      Use the ELF format internally for shader binaries. Requires RADV to be compiled with LLVM support.
 
 .. envvar:: RADV_TEX_ANISO
 
@@ -1819,6 +1842,9 @@ RADV driver environment variables
    ``full``
      mitigate the issue completely, no risk but performance might be decreased
      (default value)
+   ``full_rez``
+     mitigate the issue completely and force early-Z-then-ReZ to recover some
+     of the early-Z rejection lost by disabling HiZ
 
 RadeonSI driver environment variables
 -------------------------------------
@@ -2299,6 +2325,29 @@ PowerVR driver environment variables
 .. envvar:: PCO_COLOR
 
    if set to ``auto`` PCO IR will be colorized if stdout is not a pipe.
+   Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
+   Defaults to ``auto``.
+
+.. envvar:: PDSC_DEBUG
+
+   A comma-separated list of named flags for the PDS compiler,
+   which control various compilation options:
+
+   ``val_skip``
+      Skip IR validation.
+
+   ``print``
+      Print the PDS IR.
+
+   ``raw_regs``
+      Print raw regs, not names.
+
+   ``print_binary``
+      Print the PDS binary.
+
+.. envvar:: PDSC_COLOR
+
+   if set to ``auto`` PDSC IR will be colorized if stdout is not a pipe.
    Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
    Defaults to ``auto``.
 

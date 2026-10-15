@@ -25,6 +25,7 @@ typedef struct {
    bool disable_tg4_trunc_coord;
    bool has_desc_resource_level;
    bool enable_custom_border_on_compute_queue;
+   bool gfx10_descriptor_alias_robust;
 
    const struct radv_shader_args *args;
    const struct radv_shader_info *info;
@@ -309,39 +310,53 @@ get_sampler_desc(nir_builder *b, lower_descriptors_state *state, nir_deref_instr
    nir_def *desc = ac_nir_load_smem(b, size, addr, index_offset, size * 4u, 0);
 
    if (desc_type == AC_DESC_IMAGE && state->has_image_load_dcc_bug && !tex && !write) {
-      nir_def *comp[8];
-      for (unsigned i = 0; i < 8; i++)
-         comp[i] = nir_channel(b, desc, i);
+      nir_def *rsrc6 = nir_channel(b, desc, 6);
 
       /* WRITE_COMPRESS_ENABLE must be 0 for all image loads to workaround a
        * hardware bug.
        */
-      comp[6] = nir_iand_imm(b, comp[6], C_00A018_WRITE_COMPRESS_ENABLE);
+      rsrc6 = nir_iand_imm(b, rsrc6, C_00A018_WRITE_COMPRESS_ENABLE);
 
-      return nir_vec(b, comp, 8);
-   } else if (desc_type == AC_DESC_SAMPLER && tex->op == nir_texop_tg4 && state->disable_tg4_trunc_coord) {
-      nir_def *comp[4];
-      for (unsigned i = 0; i < 4; i++)
-         comp[i] = nir_channel(b, desc, i);
+      desc = nir_vector_insert_imm(b, desc, rsrc6, 6);
+   }
+
+   if ((desc_type == AC_DESC_IMAGE || desc_type == AC_DESC_FMASK) && state->gfx10_descriptor_alias_robust) {
+      nir_def *rsrc3 = nir_channel(b, desc, 3);
+
+      /* GFX10 has a broken descriptor type check for images.
+       * It checks if the full 4 msb are zero, but for buffer descriptors, only the last two are
+       * the resource type (0), the others are OOB_SELECT and not zero.
+       *
+       * To workaround this, zero OOB_SELECT when needed.
+       */
+      nir_def *is_image = nir_test_mask(b, rsrc3, (uint32_t)~C_008F0C_TYPE);
+      nir_def *as_buffer = nir_iand_imm(b, rsrc3, C_008F0C_OOB_SELECT);
+      rsrc3 = nir_bcsel(b, is_image, rsrc3, as_buffer);
+
+      desc = nir_vector_insert_imm(b, desc, rsrc3, 3);
+   }
+
+   if (desc_type == AC_DESC_SAMPLER && tex->op == nir_texop_tg4 && state->disable_tg4_trunc_coord) {
+      nir_def *rsrc0 = nir_channel(b, desc, 0);
 
       /* We want to always use the linear filtering truncation behaviour for
        * nir_texop_tg4, even if the sampler uses nearest/point filtering.
        */
-      comp[0] = nir_iand_imm(b, comp[0], C_008F30_TRUNC_COORD);
+      rsrc0 = nir_iand_imm(b, rsrc0, C_008F30_TRUNC_COORD);
 
-      return nir_vec(b, comp, 4);
-   } else if (!state->enable_custom_border_on_compute_queue && desc_type == AC_DESC_SAMPLER &&
-              (b->shader->info.stage == MESA_SHADER_COMPUTE || b->shader->info.stage == MESA_SHADER_TASK ||
-               mesa_shader_stage_is_rt(b->shader->info.stage))) {
-      nir_def *comp[4];
-      for (unsigned i = 0; i < 4; i++)
-         comp[i] = nir_channel(b, desc, i);
+      desc = nir_vector_insert_imm(b, desc, rsrc0, 0);
+   }
+
+   if (!state->enable_custom_border_on_compute_queue && desc_type == AC_DESC_SAMPLER &&
+       (b->shader->info.stage == MESA_SHADER_COMPUTE || b->shader->info.stage == MESA_SHADER_TASK ||
+        mesa_shader_stage_is_rt(b->shader->info.stage))) {
+      nir_def *rsrc3 = nir_channel(b, desc, 3);
 
       /* Replace custom border color by transparent black to prevent GPU hangs when task/compute/RT
        * shaders are executed on the compute queue because the hw is fundamentally broken and it
        * can't support multiple color palettes.
        */
-      nir_def *border_color_type = nir_iand_imm(b, comp[3], ~C_008F3C_BORDER_COLOR_TYPE);
+      nir_def *border_color_type = nir_iand_imm(b, rsrc3, ~C_008F3C_BORDER_COLOR_TYPE);
       nir_def *is_custom_border_color =
          nir_ieq_imm(b, border_color_type, S_008F3C_BORDER_COLOR_TYPE(V_008F3C_SQ_TEX_BORDER_COLOR_REGISTER));
 
@@ -355,14 +370,14 @@ get_sampler_desc(nir_builder *b, lower_descriptors_state *state, nir_deref_instr
             is_compute_queue = nir_load_param(b, RT_ARG_IS_COMPUTE_QUEUE);
          }
 
-         comp[3] = nir_bcsel(b, nir_iand(b, nir_ieq_imm(b, is_compute_queue, 1), is_custom_border_color),
-                             nir_iand_imm(b, comp[3], C_008F3C_BORDER_COLOR_TYPE), comp[3]);
+         rsrc3 = nir_bcsel(b, nir_iand(b, nir_ieq_imm(b, is_compute_queue, 1), is_custom_border_color),
+                           nir_iand_imm(b, rsrc3, C_008F3C_BORDER_COLOR_TYPE), rsrc3);
       } else {
          assert(b->shader->info.stage == MESA_SHADER_TASK);
-         comp[3] = nir_bcsel(b, is_custom_border_color, nir_iand_imm(b, comp[3], C_008F3C_BORDER_COLOR_TYPE), comp[3]);
+         rsrc3 = nir_bcsel(b, is_custom_border_color, nir_iand_imm(b, rsrc3, C_008F3C_BORDER_COLOR_TYPE), rsrc3);
       }
 
-      return nir_vec(b, comp, 4);
+      desc = nir_vector_insert_imm(b, desc, rsrc3, 3);
    }
 
    return desc;
@@ -770,6 +785,7 @@ radv_nir_lower_descriptors(nir_shader *shader, const struct radv_compiler_info *
       .disable_tg4_trunc_coord = !compiler_info->ac->conformant_trunc_coord && !compiler_info->key.disable_trunc_coord,
       .has_desc_resource_level = compiler_info->ac->has_desc_resource_level,
       .enable_custom_border_on_compute_queue = compiler_info->key.enable_custom_border_on_compute_queue,
+      .gfx10_descriptor_alias_robust = compiler_info->key.gfx10_descriptor_alias_robust,
       .args = &stage->args,
       .info = &stage->info,
       .layout = &stage->layout,
