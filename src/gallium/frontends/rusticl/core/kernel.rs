@@ -1554,7 +1554,7 @@ impl Kernel {
         }
 
         for i in 0..work_dim {
-            let dim_log = grid[0].trailing_zeros().min(subgroup_log);
+            let dim_log = grid[i].trailing_zeros().min(subgroup_log);
             let dim_pot = 1 << dim_log;
 
             subgroup_log -= dim_log;

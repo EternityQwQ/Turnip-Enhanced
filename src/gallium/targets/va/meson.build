@@ -25,10 +25,6 @@ link_with_libva_gallium = [
   libpipe_loader_static, libws_null, libwsw, libswdri, libswkmsdri,
 ]
 
-if with_glx == 'xlib'
-  link_with_libva_gallium += [libws_xlib]
-endif
-
 devenv.set('LIBVA_DRIVERS_PATH', meson.current_build_dir())
 
 if host_machine.system() == 'windows'

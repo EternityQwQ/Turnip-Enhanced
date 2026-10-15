@@ -5,7 +5,6 @@ use crate::api::event::create_and_queue;
 use crate::api::icd::*;
 use crate::api::util::*;
 use crate::core::device::*;
-use crate::core::event::*;
 use crate::core::kernel::*;
 use crate::core::memory::*;
 use crate::core::program::*;
@@ -803,16 +802,16 @@ fn enqueue_ndrange_kernel(
     // If global_work_size is NULL, or the value in any passed dimension is 0 then the kernel
     // command will trivially succeed after its event dependencies are satisfied and subsequently
     // update its completion event.
-    let cb: EventSig = if global_work_size.contains(&0) {
-        Box::new(|_, _| Ok(()))
+    let cb = if global_work_size.contains(&0) {
+        None
     } else {
-        k.launch(
+        Some(k.launch(
             q.device,
             work_dim,
             local_work_size,
             global_work_size,
             global_work_offset,
-        )?
+        )?)
     };
 
     create_and_queue(q, CL_COMMAND_NDRANGE_KERNEL, evs, event, false, cb)

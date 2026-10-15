@@ -319,11 +319,33 @@ enum pipe_map_flags
    PIPE_MAP_ONCE = 1 << 13,
 
    /**
+    * Mapping will support transfer_clientptr_range
+    */
+   PIPE_MAP_CLIENT_POINTER = 1 << 14,
+
+   /**
+    * Short lived internal mapping used for data upload/download.
+    *
+    * buffer_unmap must be called in finite time, as the driver may lock
+    * PIPE_MAP_CLIENT_POINTER maps until buffer_unmap is called, enabling
+    * the driver to remap the buffer into the client address range.
+    *
+    * Note for threaded context implementations: when set, buffer_map and
+    * buffer_unmap are called from the same thread.
+    */
+   PIPE_MAP_SHORT_LIVED = 1 << 15,
+
+   /**
     * This and higher bits are reserved for private use by drivers. Drivers
     * should use this as (PIPE_MAP_DRV_PRV << i).
     */
-   PIPE_MAP_DRV_PRV = 1 << 14,
+   PIPE_MAP_DRV_PRV = 1 << 16,
 };
+
+/*
+ * Return value for buffer_map
+ */
+#define PIPE_TRANSFER_CLIENT_POINTER (void *) -1
 
 /**
  * Flags for the flush function.
@@ -337,6 +359,8 @@ enum pipe_flush_flags
    PIPE_FLUSH_HINT_FINISH = (1 << 4),
    PIPE_FLUSH_TOP_OF_PIPE = (1 << 5),
    PIPE_FLUSH_BOTTOM_OF_PIPE = (1 << 6),
+   /* this is triggered internally and does not signal the end of commands */
+   PIPE_FLUSH_INTERMEDIATE = (1 << 7),
 };
 
 /**
@@ -518,7 +542,8 @@ enum pipe_flush_flags
 #define PIPE_RESOURCE_FLAG_FIXED_ADDRESS         (1 << 9) /* virtual memory address never changes */
 #define PIPE_RESOURCE_FLAG_FRONTEND_VM           (1 << 10) /* the frontend assigns addresses */
 #define PIPE_RESOURCE_FLAG_MAP_UNSYNCHRONIZED    (1 << 11) /* the texture can be mapped UNSYNCHRONIZED */
-#define PIPE_RESOURCE_FLAG_DRV_PRIV              (1 << 12) /* driver/winsys private */
+#define PIPE_RESOURCE_FLAG_MAP_CLIENT_POINTER    (1 << 12) /* the resource can be mapped to a client pointer range */
+#define PIPE_RESOURCE_FLAG_DRV_PRIV              (1 << 13) /* driver/winsys private */
 #define PIPE_RESOURCE_FLAG_FRONTEND_PRIV         (1 << 24) /* gallium frontend private */
 
 /**
@@ -1035,7 +1060,6 @@ struct pipe_caps {
    bool viewport_mask;
    bool alpha_to_coverage_dither_control;
    bool map_unsynchronized_thread_safe;
-   bool blend_equation_advanced;
    bool nir_atomics_as_deref;
    bool no_clip_on_copy_tex;
    bool shader_atomic_int64;
@@ -1074,6 +1098,7 @@ struct pipe_caps {
    bool prefer_persp;
    bool blit_3d;
    bool glsl_bindless_handles_are_32bit;
+   bool polygon_stipple;
 
    int accelerated;
    int min_texel_offset;
@@ -1124,6 +1149,7 @@ struct pipe_caps {
    unsigned rasterizer_subpixel_bits;
    unsigned mixed_color_depth_bits;
    unsigned fbfetch;
+   unsigned blend_equation_advanced;
    unsigned sparse_buffer_page_size;
    unsigned max_combined_shader_output_resources;
    unsigned framebuffer_msaa_constraints;
@@ -1133,6 +1159,7 @@ struct pipe_caps {
    unsigned max_gs_invocations;
    unsigned max_shader_buffer_size;
    unsigned max_combined_shader_buffers;
+   unsigned max_combined_image_uniforms;
    unsigned max_combined_hw_atomic_counters;
    unsigned max_combined_hw_atomic_counter_buffers;
    unsigned max_texture_upload_memory_budget;
@@ -1175,6 +1202,7 @@ struct pipe_caps {
    unsigned multiview;
    unsigned max_label_length;
    uint64_t max_timeline_semaphore_difference;
+   unsigned map_client_pointer;
 
    /** for CL SVM */
    uint64_t min_vma;
@@ -1234,6 +1262,26 @@ enum pipe_context_param
     * benefits from it.
     */
    PIPE_CONTEXT_PARAM_UPDATE_THREAD_SCHEDULING,
+
+   /* The minification/magnification switch-over point, the constant c of the
+    * GL and ES specs. Value 1 selects c = 0.5, value 0 selects c = 0.
+    *
+    * ES 2.0 section 3.7.8 requires the first: "If the magnification filter is
+    * given by LINEAR and the minification filter is given by
+    * NEAREST_MIPMAP_NEAREST or NEAREST_MIPMAP_LINEAR, then c = 0.5. This is
+    * done to ensure that a minified texture does not appear "sharper" than a
+    * magnified texture. Otherwise c = 0."
+    *
+    * GL 3.1 section 3.8.9 relaxed it to "Implementations may either
+    * unconditionally assume c = 0 [...] or may choose to make c depend on the
+    * combination of minification and magnification modes" (bug 4392), and
+    * GL 4.5 and ES 3.0 removed the choice again, c = 0 always (Bug 9997).
+    *
+    * So c = 0.5 is required up to GL 3.0 and in ES 2.0, and additionally
+    * allowed from GL 3.1 to 4.4. Only sent where it is required, so drivers
+    * default to c = 0.
+    */
+   PIPE_CONTEXT_PARAM_MAG_SWITCHOVER_HALF,
 };
 
 /**

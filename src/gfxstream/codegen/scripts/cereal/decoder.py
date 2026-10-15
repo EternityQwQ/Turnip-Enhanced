@@ -665,7 +665,7 @@ def decode_vkInvalidateMappedMemoryRanges(typeInfo, api, cgen):
 
 def decode_unsupported_api(typeInfo, api, cgen):
     cgen.line(f"// Decoding {api.name} is not supported. This should not run.")
-    cgen.stmt(f"fprintf(stderr, \"stream %p: fatal: decoding unsupported API {api.name}\\n\", ioStream)");
+    cgen.stmt(f"GFXSTREAM_ERROR(\"stream %p: fatal: decoding unsupported API {api.name}\", ioStream)")
     cgen.stmt("__builtin_trap()")
 
 custom_decodes = {
@@ -898,6 +898,8 @@ custom_decodes = {
     # Image requirements need to be adjusted for compressed textures
     "vkGetDeviceImageMemoryRequirements" : emit_global_state_wrapped_decoding,
     "vkGetDeviceImageMemoryRequirementsKHR" : emit_global_state_wrapped_decoding,
+    "vkGetDeviceBufferMemoryRequirements" : emit_global_state_wrapped_decoding,
+    "vkGetDeviceBufferMemoryRequirementsKHR" : emit_global_state_wrapped_decoding,
 
     # VK_EXT_private_data
     "vkCreatePrivateDataSlotEXT" : emit_global_state_wrapped_decoding,

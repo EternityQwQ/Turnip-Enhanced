@@ -86,7 +86,6 @@ vlVaBeginPicture(VADriverContextP ctx, VAContextID context_id, VASurfaceID rende
    if (context->templat.entrypoint == PIPE_VIDEO_ENTRYPOINT_ENCODE) {
       switch (u_reduce_video_profile(context->templat.profile)) {
          case PIPE_VIDEO_FORMAT_AV1:
-            context->desc.av1enc.metadata_flags.value = 0;
             context->desc.av1enc.roi.num = 0;
             context->desc.av1enc.intra_refresh.mode = INTRA_REFRESH_MODE_NONE;
             break;
@@ -335,7 +334,10 @@ vlVaEndPicture(VADriverContextP ctx, VAContextID context_id)
       context->desc.base.out_pipe_fence = &surf->pipe_fence;
    }
 
-   if (!drv->pipe->screen->is_video_format_supported(drv->pipe->screen,
+   /* This only checks the hw processor supported formats, but for procssing
+    * we also have a shader fallback which may support different formats. */
+   if (context->decoder->entrypoint != PIPE_VIDEO_ENTRYPOINT_PROCESSING &&
+       !drv->pipe->screen->is_video_format_supported(drv->pipe->screen,
                                                      context->target->buffer_format,
                                                      context->decoder->profile,
                                                      context->decoder->entrypoint)) {

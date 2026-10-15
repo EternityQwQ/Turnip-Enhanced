@@ -138,7 +138,8 @@ impl ProgramBuild {
                     continue;
                 };
 
-                if !build.is_success() {
+                // Skip compiling nirs for failed builds and non executables.
+                if !build.is_success() || build.bin_type != CL_PROGRAM_BINARY_TYPE_EXECUTABLE {
                     continue;
                 }
 
