@@ -3568,11 +3568,12 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                               "kgsl_profiling_suballoc");
    }
 
-    /* 4 pages hold 256 events per BO: fewer suballoc GEM_NEW calls and
-     * less event_mutex contention on event-heavy titles. */
-    tu_bo_suballocator_init(&device->event_suballoc, device,
-       4 * getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
-       "event_suballoc");
+     /* 4 pages hold 256 events per BO: fewer suballoc GEM_NEW calls and
+      * less event_mutex contention on event-heavy titles. CPU-polled,
+      * so use cached-coherent when available (WC reads are bus transactions). */
+     tu_bo_suballocator_init_cached(&device->event_suballoc, device,
+        4 * getpagesize(), TU_BO_ALLOC_INTERNAL_RESOURCE,
+        "event_suballoc");
 
    tu_bo_suballocator_init(
       &device->vis_stream_suballocator, device,
@@ -5205,18 +5206,38 @@ tu_debug_bos_print_stats(struct tu_device *dev)
 
    mtx_lock(&dev->bo_mutex);
 
-   /* Put the HT's sizes data in an array so we can sort by number of allocations. */
+   /* Snapshot copies under the lock, then sort/log unlocked so submits
+    * never queue behind qsort+IO. Entries can be freed by concurrent
+    * tu_debug_bos_del (count->0) once we unlock, so copy count/size and
+    * strdup the name instead of holding raw pointers (UAF). */
    struct util_dynarray dyn = UTIL_DYNARRAY_INIT;
 
-   uint32_t size = 0;
-   uint32_t count = 0;
    hash_table_foreach(dev->bo_sizes, entry)
    {
       struct tu_debug_bos_entry *debug_bos =
          (struct tu_debug_bos_entry *) entry->data;
-      util_dynarray_append(&dyn, debug_bos);
-      size += debug_bos->size / 1024;
-      count += debug_bos->count;
+      struct tu_debug_bos_entry *copy =
+         (struct tu_debug_bos_entry *) malloc(sizeof(*copy));
+      if (!copy)
+         continue;
+      copy->count = debug_bos->count;
+      copy->size = debug_bos->size;
+      copy->name = debug_bos->name ? strdup(debug_bos->name) : NULL;
+      if (debug_bos->name && !copy->name) {
+         free(copy);
+         continue;
+      }
+      util_dynarray_append(&dyn, copy);
+   }
+
+   mtx_unlock(&dev->bo_mutex);
+
+   uint32_t size = 0;
+   uint32_t count = 0;
+   util_dynarray_foreach(&dyn, struct tu_debug_bos_entry *, entryp)
+   {
+      size += (*entryp)->size / 1024;
+      count += (*entryp)->count;
    }
 
    qsort(dyn.data,
@@ -5232,9 +5253,12 @@ tu_debug_bos_print_stats(struct tu_device *dev)
 
    mesa_logi("submitted %d bos (%d MB)\n", count, DIV_ROUND_UP(size, 1024));
 
+   util_dynarray_foreach(&dyn, struct tu_debug_bos_entry *, entryp)
+   {
+      free((void *) (*entryp)->name);
+      free(*entryp);
+   }
    util_dynarray_fini(&dyn);
-
-   mtx_unlock(&dev->bo_mutex);
 }
 
 void

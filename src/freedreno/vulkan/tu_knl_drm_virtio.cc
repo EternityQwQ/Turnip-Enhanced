@@ -419,7 +419,16 @@ tu_wait_fence(struct tu_device *dev,
          .fence = fence,
    };
    struct msm_ccmd_submitqueue_query_rsp *rsp;
-   int64_t end_time = os_time_get_nano() + timeout_ns;
+   /* Host WAIT_FENCE is non-blocking by design (see msm_proto.h: guest
+    * must poll). Add guest-side exponential backoff to avoid virtqueue
+    * storm: fast try first, then yield, then progressively longer sleeps.
+    * Deadline rechecked once per 16 polls to avoid vDSO spam. */
+   bool infinite = (timeout_ns == OS_TIMEOUT_INFINITE);
+   uint64_t end_time = 0;
+   if (!infinite)
+      end_time = os_time_get_nano() + timeout_ns;
+   uint32_t polls = 0;
+   uint64_t sleep_us = 50;
    int ret;
 
    do {
@@ -431,11 +440,26 @@ tu_wait_fence(struct tu_device *dev,
          goto out;
 
       ret = rsp->ret;
+      if (ret != -ETIMEDOUT)
+         break;
 
-      if (timeout_ns != OS_TIMEOUT_INFINITE &&
+      if (!infinite && (polls & 15) == 0 &&
           os_time_get_nano() >= end_time)
          break;
-   } while (ret == -ETIMEDOUT);
+
+      polls++;
+      if (polls < 8) {
+#if defined(__aarch64__) || defined(__arm__)
+         __asm__ volatile("yield" ::: "memory");
+#else
+         sched_yield();
+#endif
+      } else {
+         os_time_sleep(sleep_us);
+         if (sleep_us < 1000)
+            sleep_us *= 2;
+      }
+   } while (true);
 
 out:
    if (!ret) return VK_SUCCESS;

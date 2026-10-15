@@ -21,6 +21,7 @@
  */
 
 #include "tu_suballoc.h"
+#include "tu_device.h"
 
 /* Initializes a BO sub-allocator using refcounts on BOs.
  */
@@ -34,10 +35,22 @@ tu_bo_suballocator_init(struct tu_suballocator *suballoc,
    suballoc->dev = dev;
    suballoc->default_size = default_size;
    suballoc->flags = flags;
+   suballoc->use_cached = false;
    suballoc->bo = NULL;
    suballoc->cached_count = 0;
    suballoc->cached_bytes = 0;
    suballoc->name = name;
+}
+
+void
+tu_bo_suballocator_init_cached(struct tu_suballocator *suballoc,
+                               struct tu_device *dev,
+                               uint32_t default_size,
+                               enum tu_bo_alloc_flags flags,
+                               const char *name)
+{
+   tu_bo_suballocator_init(suballoc, dev, default_size, flags, name);
+   suballoc->use_cached = true;
 }
 
 void
@@ -109,9 +122,16 @@ tu_suballoc_bo_alloc(struct tu_suballoc_bo *suballoc_bo,
 
    /* Allocate the new BO if we didn't have one cached. */
    if (!suballoc->bo) {
-      VkResult result = tu_bo_init_new(suballoc->dev, NULL,
-                                       &suballoc->bo, alloc_size,
-                                       suballoc->flags, suballoc->name);
+      VkResult result;
+      if (suballoc->use_cached) {
+         result = tu_bo_init_new_cached(suballoc->dev, NULL,
+                                        &suballoc->bo, alloc_size,
+                                        suballoc->flags, suballoc->name);
+      } else {
+         result = tu_bo_init_new(suballoc->dev, NULL,
+                                 &suballoc->bo, alloc_size,
+                                 suballoc->flags, suballoc->name);
+      }
       if (result != VK_SUCCESS)
          return result;
    }

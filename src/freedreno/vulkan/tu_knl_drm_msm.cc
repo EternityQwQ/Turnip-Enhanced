@@ -1270,11 +1270,11 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
    uint32_t extra_signal_count =
       (queue->type == TU_QUEUE_GFX && has_vm_bind) ? 1 : 0;
 
-   /* Small submits (the common case: 0-2 syncs) avoid two
-    * vk_zalloc/vk_free per submit. Use stack arrays, heap only for large. */
-   struct drm_msm_syncobj in_stack[4], out_stack[4];
-   bool in_heap = (wait_count + extra_wait_count) > 4;
-   bool out_heap = (signal_count + extra_signal_count) > 4;
+    /* Small submits (the common case: 0-8 syncs) avoid two
+     * vk_zalloc/vk_free per submit. Use stack arrays, heap only for large. */
+    struct drm_msm_syncobj in_stack[8], out_stack[8];
+    bool in_heap = (wait_count + extra_wait_count) > 8;
+    bool out_heap = (signal_count + extra_signal_count) > 8;
 
    if (!in_heap) {
       in_syncobjs = (wait_count + extra_wait_count) ? in_stack : NULL;
@@ -1358,9 +1358,21 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
        * the memory required for page tables. Sort the entries to make sure
        * that neighboring mappings are next to each other.
        */
-      if (nr_ops > 1)
-         qsort(submit->binds.data, nr_ops, sizeof(struct drm_msm_vm_bind_op),
-               compare_binds);
+       if (nr_ops > 1) {
+          /* Skip qsort when already sorted (common: append order == iova order). */
+          struct drm_msm_vm_bind_op *ops =
+             (struct drm_msm_vm_bind_op *) submit->binds.data;
+          bool sorted = true;
+          for (unsigned k = 1; k < nr_ops; k++) {
+             if (ops[k - 1].iova > ops[k].iova) {
+                sorted = false;
+                break;
+             }
+          }
+          if (!sorted)
+             qsort(submit->binds.data, nr_ops, sizeof(struct drm_msm_vm_bind_op),
+                   compare_binds);
+       }
 
       u_rwlock_rdlock(&queue->device->vm_bind_fence_lock);
 
@@ -1530,17 +1542,16 @@ msm_queue_submit(struct tu_queue *queue, void *_submit,
 
          /* drm_msm_gem_submit_cmd requires index of bo which could change at
           * any time when bo_mutex is not locked. So we update the index here
-          * under the lock.
-          */
-         util_dynarray_foreach (&submit->commands, struct drm_msm_gem_submit_cmd,
-                                cmd) {
-            unsigned i = cmd -
-               util_dynarray_element(&submit->commands,
-                                     struct drm_msm_gem_submit_cmd, 0);
-            struct tu_bo **bo = util_dynarray_element(&submit->command_bos,
-                                                      struct tu_bo *, i);
-            cmd->submit_idx = (*bo)->submit_bo_list_idx;
-         }
+          * under the lock. Use raw pointers to avoid per-entry dynarray
+          * index math. */
+         struct drm_msm_gem_submit_cmd *cmds =
+            (struct drm_msm_gem_submit_cmd *) submit->commands.data;
+         struct tu_bo **bos =
+            (struct tu_bo **) submit->command_bos.data;
+         unsigned ncmds = util_dynarray_num_elements(&submit->commands,
+            struct drm_msm_gem_submit_cmd);
+         for (unsigned i = 0; i < ncmds; i++)
+            cmds[i].submit_idx = bos[i]->submit_bo_list_idx;
       }
 
        struct drm_msm_gem_submit req = {
