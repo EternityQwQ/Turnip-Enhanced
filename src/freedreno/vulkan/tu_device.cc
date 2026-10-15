@@ -3066,7 +3066,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       "pipeline_suballoc");
    if (is_kgsl(physical_device->instance)) {
       tu_bo_suballocator_init(&device->kgsl_profiling_suballoc, device,
-                              128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
+                              256 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
                               "kgsl_profiling_suballoc");
    }
 
@@ -3079,7 +3079,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    tu_bo_suballocator_init(
       &device->vis_stream_suballocator, device,
-      getpagesize(),
+      2 * getpagesize(),
       static_cast<enum tu_bo_alloc_flags>(TU_BO_ALLOC_INTERNAL_RESOURCE |
                                           TU_BO_ALLOC_ALLOW_DUMP),
       "vis_stream_suballoc");
