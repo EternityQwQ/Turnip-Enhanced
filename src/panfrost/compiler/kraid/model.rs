@@ -1,12 +1,21 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
+use std::ptr;
+
 use crate::encode_v9::*;
 use crate::ir::*;
 use crate::isa::ExecUnit;
+use compiler::bitset::ConstBitSet;
 use kraid_bindings::*;
 
 pub use kraid_bindings::pan_model as PanModel;
+
+pub const MAX_REG_COUNT: usize = 128;
+pub const MAX_REG_BYTES: usize = MAX_REG_COUNT * size_of::<u32>();
+const MAX_REG_WORDS: usize = MAX_REG_BYTES / (u32::BITS as usize);
+
+pub type RegByteSet = ConstBitSet<MAX_REG_WORDS, u16>;
 
 pub struct SmallConstantTable(Vec<SmallConstant>);
 
@@ -16,6 +25,21 @@ impl<'a> IntoIterator for &'a SmallConstantTable {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
+    }
+}
+
+impl SmallConstantTable {
+    pub fn find_imm8(&self, mut filter: impl FnMut(u8) -> bool) -> Option<Src> {
+        for small_const in self {
+            for byte_idx in 0..4 {
+                let imm8 = (small_const.imm32 >> (byte_idx * 8)) as u8;
+                if filter(imm8) {
+                    let src = Src::from(FAURef::from(small_const));
+                    return Some(src.byte(byte_idx));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -29,6 +53,9 @@ pub struct FAUModel {
     /// they need to be "aligned" to the same 64-bit address.
     /// This limit has been lifted from v14
     pub single_fau_ram_index: bool,
+
+    /// From v12 k0 does not consume any FAU bandwidth.
+    pub is_zero_free: bool,
 }
 
 impl FAUModel {
@@ -46,7 +73,7 @@ impl FAUModel {
 pub trait Model {
     fn arch(&self) -> u8;
 
-    fn pan_model(&self) -> &PanModel;
+    fn pan_model(&self) -> Option<&PanModel>;
 
     fn fau(&self) -> &FAUModel;
 
@@ -55,6 +82,8 @@ pub trait Model {
     fn op_is_supported(&self, op: &Op) -> bool;
 
     fn op_exec_unit(&self, op: &Op) -> Option<ExecUnit>;
+
+    fn op_exec_time(&self, op: &Op) -> Option<u8>;
 
     fn op_is_message(&self, op: &Op) -> bool;
 
@@ -71,6 +100,12 @@ pub trait Model {
         swizzle: Swizzle,
     ) -> bool;
 
+    fn op_src_supported_swizzles(
+        &self,
+        op: &Op,
+        src: &Src,
+    ) -> AsmSwizzleWidenSet;
+
     fn op_src_supports_mod(&self, op: &Op, src: &Src, src_mod: SrcMod) -> bool;
 
     fn op_dst_is_staging_reg(&self, op: &Op) -> bool;
@@ -80,6 +115,10 @@ pub trait Model {
     fn op_dst_supports_lanes(&self, op: &Op, lanes: DstLanes) -> bool {
         self.op_dst_supported_lanes(op).contains(lanes)
     }
+
+    fn op_fixed_src_reg(&self, op: &Op, src: &Src) -> Option<RegRef>;
+
+    fn op_fixed_dst_reg(&self, op: &Op, dst: &Dst) -> Option<RegRef>;
 
     fn preload_reg(&self, preload: PreloadReg) -> Option<RegRef>;
 
@@ -94,7 +133,7 @@ pub trait Model {
 
 struct ValhallModel {
     arch: u8,
-    pan_model: std::ptr::NonNull<PanModel>,
+    pan_model: *const PanModel,
     fau: FAUModel,
 }
 
@@ -103,7 +142,7 @@ unsafe impl Send for ValhallModel {}
 unsafe impl Sync for ValhallModel {}
 
 impl ValhallModel {
-    fn new(arch: u8, pan_model: std::ptr::NonNull<PanModel>) -> ValhallModel {
+    fn new(arch: u8, pan_model: *const PanModel) -> ValhallModel {
         use crate::isa::{SmallConstantTable, v9};
         let sc_table = SmallConstantTable(v9::SmallConstantT::collect(arch));
         let fau = FAUModel {
@@ -113,6 +152,7 @@ impl ValhallModel {
                 ValhallModel::special_fau(special, arch)
             }),
             single_fau_ram_index: arch < 14,
+            is_zero_free: arch >= 12,
         };
         ValhallModel {
             arch,
@@ -168,6 +208,7 @@ impl ValhallModel {
             idx: idx << 1, // FAURef::idx is in units of 32-bit words
             special: Some(special),
             load64: true,
+            imm32: None,
         })
     }
 }
@@ -177,7 +218,7 @@ impl Model for ValhallModel {
         self.arch
     }
 
-    fn pan_model(&self) -> &PanModel {
+    fn pan_model(&self) -> Option<&PanModel> {
         unsafe { self.pan_model.as_ref() }
     }
 
@@ -195,6 +236,10 @@ impl Model for ValhallModel {
 
     fn op_exec_unit(&self, op: &Op) -> Option<ExecUnit> {
         v9_op_exec_unit(op, self.arch)
+    }
+
+    fn op_exec_time(&self, op: &Op) -> Option<u8> {
+        v9_op_exec_time(op, self.arch)
     }
 
     fn op_is_message(&self, op: &Op) -> bool {
@@ -242,6 +287,18 @@ impl Model for ValhallModel {
         }
     }
 
+    fn op_src_supported_swizzles(
+        &self,
+        op: &Op,
+        src: &Src,
+    ) -> AsmSwizzleWidenSet {
+        if let Some(vop) = op.as_virtual() {
+            vop.src_supported_swizzles(src, op.src_type(src))
+        } else {
+            v9_op_src_supported_swizzles(op, src, self.arch)
+        }
+    }
+
     fn op_src_supports_mod(&self, op: &Op, src: &Src, src_mod: SrcMod) -> bool {
         if let Some(vop) = op.as_virtual() {
             vop.src_supports_mod(src, src_mod)
@@ -263,6 +320,51 @@ impl Model for ValhallModel {
             vop.dst_supported_lanes()
         } else {
             v9_op_dst_supported_lanes(op, self.arch)
+        }
+    }
+
+    fn op_fixed_src_reg(&self, op: &Op, src: &Src) -> Option<RegRef> {
+        let preg = |p| Some(self.preload_reg(p).unwrap());
+        let coverage = preg(PreloadReg::CumulativeCoverage);
+        match op {
+            Op::ATest(op) if ptr::eq(&op.coverage, src) => coverage,
+            Op::ZSEmit(op) if ptr::eq(&op.coverage, src) => coverage,
+            Op::Blend(op) if ptr::eq(&op.coverage, src) => coverage,
+            Op::BlendCall(op) => {
+                if ptr::eq(&op.color, src) {
+                    preg(PreloadReg::BlendInputSrc0)
+                } else if ptr::eq(&op.second_color, src) {
+                    if op.has_second_color {
+                        preg(PreloadReg::BlendInputSrc1)
+                    } else {
+                        assert!(op.second_color.src_ref == SrcRef::Zero);
+                        None
+                    }
+                } else if ptr::eq(&op.coverage, src) {
+                    coverage
+                } else if ptr::eq(&op.sample_id, src) {
+                    preg(PreloadReg::SampleCentroidId)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn op_fixed_dst_reg(&self, op: &Op, dst: &Dst) -> Option<RegRef> {
+        let coverage =
+            Some(self.preload_reg(PreloadReg::CumulativeCoverage).unwrap());
+        match op {
+            Op::ATest(op) => {
+                assert!(ptr::eq(&op.dst, dst));
+                coverage
+            }
+            Op::ZSEmit(op) => {
+                assert!(ptr::eq(&op.dst, dst));
+                coverage
+            }
+            _ => None,
         }
     }
 
@@ -290,6 +392,9 @@ impl Model for ValhallModel {
             RasterizerCoverage => 61,
             SampleCentroidId => 61,
             FrameArg => 62,
+            BlendInputSrc0 => 0,
+            BlendInputSrc1 => 4,
+            BlendReturnAddr => 48,
         };
 
         Some(RegRef {
@@ -308,17 +413,10 @@ impl Model for ValhallModel {
     }
 }
 
-pub fn model_for_gpu_id(
-    gpu_id: u64,
-    gpu_variant: u32,
+pub fn model_for_arch(
+    arch: u8,
+    pan_model: *const PanModel,
 ) -> Result<Box<dyn Model + Sync + Send>, &'static str> {
-    // SAFETY: pan_arch() just translates one integer to another
-    let arch = u8::try_from(unsafe { pan_arch(gpu_id) }).unwrap();
-    let pan_model = unsafe {
-        let model = pan_get_model(gpu_id, gpu_variant) as *mut _;
-        std::ptr::NonNull::new(model).ok_or("Invalid GPU ID or variant")?
-    };
-
     if arch >= 15 {
         Err("Kraid does not yet support this GPU")
     } else if arch >= 9 {
@@ -326,4 +424,15 @@ pub fn model_for_gpu_id(
     } else {
         Err("Kraid only supports Valhall (v9) and later GPUs")
     }
+}
+
+#[cfg(test)]
+pub fn model_for_gpu_id(
+    gpu_id: u64,
+    gpu_variant: u32,
+) -> Result<Box<dyn Model + Sync + Send>, &'static str> {
+    // SAFETY: pan_arch() just translates one integer to another
+    let arch = u8::try_from(unsafe { pan_arch(gpu_id) }).unwrap();
+    let pan_model = unsafe { pan_get_model(gpu_id, gpu_variant, 1, 0) };
+    model_for_arch(arch, pan_model)
 }

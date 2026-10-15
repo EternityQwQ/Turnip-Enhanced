@@ -28,4 +28,3 @@ angle-dEQP-GLES2.functional.negative_api.texture.compressedteximage2d_width_heig
 angle-dEQP-GLES2.functional.negative_api.texture.compressedteximage2d_width_height_max_cube_pos_y,Fail
 angle-dEQP-GLES2.functional.negative_api.texture.compressedteximage2d_width_height_max_cube_pos_z,Fail
 angle-dEQP-GLES2.functional.negative_api.texture.generatemipmap_zero_level_array_compressed,Fail
-

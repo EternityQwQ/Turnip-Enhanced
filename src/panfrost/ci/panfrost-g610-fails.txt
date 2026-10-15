@@ -85,7 +85,6 @@ spec@arb_shader_texture_lod@execution@tex-miplevel-selection *projgradarb 3d,Fai
 spec@arb_transform_feedback_instanced@draw-auto instanced,Fail
 spec@egl 1.4@egl-ext_egl_image_storage,Fail
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_mesa_configless_context@basic,Fail
 spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 16,Fail
 spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 6,Fail
 spec@ext_framebuffer_multisample@alpha-to-coverage-dual-src-blend 8,Fail
@@ -231,7 +230,6 @@ spec@khr_texture_compression_astc@sliced-3d-miptree-gl srgb-fp@sRGB decode full 
 spec@!opengl 1.0@gl-1.0-edgeflag-const,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag,Fail
 spec@!opengl 1.0@gl-1.0-edgeflag-quads,Fail
-spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.0@gl-1.0-user-clip-all-planes,Fail
 spec@!opengl 1.1@line-smooth-stipple,Fail
 spec@!opengl 1.1@linestipple@Factor 2x,Fail
@@ -269,9 +267,6 @@ spec@!opengl 1.1@polygon-mode-offset@config 6: Expected white pixel on top edge,
 spec@!opengl 1.1@polygon-mode-offset,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag,Fail
 spec@!opengl 2.0@gl-2.0-edgeflag-immediate,Fail
-spec@!opengl 2.1@pbo,Fail
-spec@!opengl 2.1@pbo@test_polygon_stip,Fail
-spec@!opengl 2.1@polygon-stipple-fs,Fail
 spec@!opengl 3.1@primitive-restart-xfb flush,Fail
 spec@!opengl 3.1@primitive-restart-xfb generated,Fail
 spec@!opengl 3.1@primitive-restart-xfb written,Fail
@@ -298,7 +293,7 @@ program@execute@vector-conversion,Fail
 Images (clCopyImage 1D),Fail
 Images (clCopyImage 1D)@1D,Fail
 Images (clCopyImage 1D)@1Darray,Fail
-Images (clCopyImage 2D),Crash
+Images (clCopyImage 2D),Fail
 Images (clCopyImage 2D)@2D,Fail
 Images (clCopyImage 2D)@2Darrayto2D,Fail
 Images (clCopyImage 2D)@2Darrayto3D,Fail

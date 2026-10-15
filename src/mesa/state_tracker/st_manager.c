@@ -1079,8 +1079,7 @@ st_api_create_context(struct pipe_frontend_screen *fscreen,
 
    st->can_scissor_clear = !!st->screen->caps.clear_scissored;
 
-   st->ctx->invalidate_on_gl_viewport =
-      fscreen->get_param(fscreen, ST_MANAGER_BROKEN_INVALIDATE);
+   st->ctx->invalidate_on_gl_viewport = fscreen->broken_invalidate;
 
    st->frontend_screen = fscreen;
 
@@ -1369,7 +1368,7 @@ get_version(struct pipe_screen *screen,
    _mesa_init_constants(&consts, api);
    _mesa_init_extensions(&extensions);
 
-   st_init_limits(screen, &consts, &extensions, api);
+   st_init_limits(screen, &consts, &extensions, options, api);
    st_init_extensions(screen, &consts, &extensions, options, api);
    version = _mesa_get_version(&extensions, &consts, api);
    free(consts.SpirVExtensions);

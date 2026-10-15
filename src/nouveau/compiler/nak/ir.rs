@@ -1,10 +1,12 @@
 // Copyright © 2022 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
-extern crate bitview;
+extern crate mesa_util;
 extern crate nak_ir_proc;
 
-use bitview::{BitMutView, BitMutViewable, BitView, BitViewable, SetField};
+use mesa_util::bitview::{
+    BitMutView, BitMutViewable, BitView, BitViewable, SetField,
+};
 use nak_bindings::*;
 
 pub use crate::builder::{Builder, InstrBuilder, SSABuilder, SSAInstrBuilder};
@@ -9374,7 +9376,7 @@ pub struct VertexShaderInfo {
 #[derive(Debug)]
 pub struct FragmentShaderInfo {
     pub uses_kill: bool,
-    pub does_interlock: bool,
+    pub reads_interlock_ticket: bool,
     pub post_depth_coverage: bool,
     pub early_fragment_tests: bool,
     pub uses_sample_shading: bool,

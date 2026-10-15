@@ -116,10 +116,6 @@ impl SrcType {
             _ => SrcType::None,
         }
     }
-
-    fn is_none(&self) -> bool {
-        matches!(self, SrcType::None)
-    }
 }
 
 struct DstModProp<'a, A> {

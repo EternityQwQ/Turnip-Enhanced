@@ -1,11 +1,13 @@
 // Copyright © 2026 Collabora, Ltd.
 // SPDX-License-Identifier: MIT
 
+use crate::data_type::NumericType;
 use crate::debug::*;
 use crate::ir::*;
-use crate::model::model_for_gpu_id;
+use crate::model::model_for_arch;
 use crate::ops::OpNop;
 use compiler::bindings::*;
+use compiler::memstream::MemStream;
 use kraid_bindings::*;
 
 use std::collections::HashMap;
@@ -32,7 +34,6 @@ fn nir_opts(arch: u8, merge_wg: bool) -> nir_shader_compiler_options {
         lower_bitfield_extract: true,
         lower_bitfield_extract8: true,
         lower_bitfield_extract16: true,
-        lower_insert_byte: true,
         has_bitfield_select: true,
 
         lower_pack_64_4x16: true,
@@ -81,10 +82,10 @@ fn nir_opts(arch: u8, merge_wg: bool) -> nir_shader_compiler_options {
             | nir_var_function_temp),
         force_indirect_unrolling_sampler: true,
         scalarize_ddx: true,
-        support_indirect_inputs: (1 << MESA_SHADER_TESS_CTRL)
-            | (1 << MESA_SHADER_TESS_EVAL)
-            | (1 << MESA_SHADER_FRAGMENT),
+        support_indirect_inputs: 0,
         lower_hadd: arch >= 11,
+        lower_hadd64: true,
+        lower_mul_32x16: true,
         discard_is_demote: true,
         has_udot_4x8: true,
         has_udot_4x8_sat: true,
@@ -141,17 +142,53 @@ fn dynarray_append_vec<T: Copy>(buf: &mut util_dynarray, vec: Vec<T>) {
 }
 
 fn write_back_info(
+    model: &dyn Model,
     src: &ShaderInfo,
     nir: &nir_shader,
     dst: &mut pan_shader_info,
+    idvs: kraid_idvs_mode,
 ) {
-    dst.work_reg_count = src.registers_used.into();
-    dst.tls_size = src.tls_size;
-    dst.preload = src.register_preload;
-    dst.has_shader_clk_instr = src.has_ld_gclk;
+    if idvs == KRAID_IDVS_VARYING {
+        let vs = unsafe { &mut dst.__bindgen_anon_1.vs };
 
-    if nir.info.stage() == MESA_SHADER_VERTEX {
-        // TODO: only for BI_IDVS_ALL (only one supported right now)
+        vs.secondary_work_reg_count = src.registers_used.into();
+        vs.secondary_preload = src.register_preload;
+    } else {
+        dst.work_reg_count = src.registers_used.into();
+        dst.preload = src.register_preload;
+    }
+
+    dst.tls_size = dst.tls_size.max(src.tls_size);
+    dst.has_shader_clk_instr |= src.has_ld_gclk;
+
+    if model.arch() >= 9 {
+        if nir.info.stage() == MESA_SHADER_FRAGMENT {
+            let bifrost_info = unsafe { dst.__bindgen_anon_2.bifrost.as_mut() };
+            bifrost_info.uses_flat_shading = src.uses_flat_shading;
+
+            let translate_color = |dt: &Option<DataType>| {
+                let Some(dt) = dt else {
+                    return nir_type_invalid;
+                };
+                let num_type = match dt.num_type() {
+                    NumericType::SignedInteger => nir_type_int,
+                    NumericType::UnsignedInteger => nir_type_uint,
+                    NumericType::Float => nir_type_float,
+                    _ => panic!("Invalid color data type"),
+                };
+                num_type | dt.bits()
+            };
+
+            for (i, btype) in src.blend_types.iter().enumerate() {
+                bifrost_info.blend[i].type_ = translate_color(btype);
+            }
+            bifrost_info.blend_src1_type = translate_color(&src.blend1_type);
+        }
+    } else {
+        panic!("Unsupported GPU generation");
+    }
+
+    if nir.info.stage() == MESA_SHADER_VERTEX && idvs == KRAID_IDVS_ALL {
         let secondary_mask =
             unsafe { val_ex_fifo_varying_bits() } | (1 << VARYING_SLOT_POS);
         dst.__bindgen_anon_1.vs.secondary_enable =
@@ -168,11 +205,13 @@ fn encode_no_psiz_variant(
     model: &dyn Model,
     binary: &mut util_dynarray,
     info: &mut pan_shader_info,
+    idvs: kraid_idvs_mode,
 ) {
     // TODO: v10+ HW should ignore psiz writes, investigate
     if nir.info.internal
         || nir.info.stage() != MESA_SHADER_VERTEX
         || (nir.info.outputs_written & (1 << VARYING_SLOT_PSIZ)) == 0
+        || !(idvs == KRAID_IDVS_POSITION || idvs == KRAID_IDVS_ALL)
     {
         return;
     }
@@ -194,20 +233,50 @@ fn encode_no_psiz_variant(
     dynarray_append_vec(binary, bin);
 }
 
+#[cfg(kraid_disasm)]
+fn print_disassembly(bin: &[u32], arch: u8) {
+    use crate::decode::{Args, disassemble};
+
+    let mut lock = std::io::stderr().lock();
+    let args = Args {
+        arch,
+        print_offset: true,
+        print_hexdump: true,
+    };
+    let mut instrs: Vec<u64> = Default::default();
+    for idx in (0..bin.len()).step_by(2) {
+        let instr = (bin[idx] as u64) | (bin[idx + 1] as u64) << 32;
+        if instr == 0 {
+            break;
+        }
+        instrs.push(instr);
+    }
+    let _ = disassemble(&mut lock, &args, &instrs);
+}
+
+#[cfg(not(kraid_disasm))]
+fn print_disassembly(_bin: &[u32], _arch: u8) {
+    eprintln!(
+        "Disassembler disabled, enable it with -Dpanfrost-disassemble=true\n"
+    );
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn kraid_compile_nir(
     nir: &mut nir_shader,
     inputs: &pan_compile_inputs,
     binary: &mut util_dynarray,
     info: &mut pan_shader_info,
+    idvs: kraid_idvs_mode,
 ) {
-    let model = model_for_gpu_id(inputs.gpu_id, inputs.gpu_variant).unwrap();
+    let model =
+        model_for_arch(inputs.arch.try_into().unwrap(), inputs.model).unwrap();
 
     if DEBUG.contains(DebugFlags::PRINT) {
         eprint!("{}", nir.to_string().unwrap());
     }
 
-    let mut s = Shader::from_nir(model.as_ref(), nir);
+    let mut s = Shader::from_nir(model.as_ref(), nir, inputs);
     s.run_pass("after translation from NIR", |_| {});
 
     pass!(s.remat_constants());
@@ -218,13 +287,16 @@ pub extern "C" fn kraid_compile_nir(
         pass!(s.opt_copy_prop());
     }
     pass!(s.lower_mkvec_swz());
+    pass!(s.opt_var());
     pass!(s.opt_dce());
+    pass!(s.opt_normalize_consts());
     pass!(s.lower_small_constants());
     if inputs.fau.promote_immediates {
         pass!(s.opt_promote_consts(&mut info.fau));
     }
-    pass!(s.legalize());
+    pass!(s.opt_exec_units());
     pass!(s.schedule_for_pressure());
+    pass!(s.legalize());
     // Shader::assign_registers() uses pass!() internally
     s.assign_registers();
     pass!(s.lower_copy());
@@ -237,21 +309,71 @@ pub extern "C" fn kraid_compile_nir(
     // These have to happen last since we can't remove any instructions after
     // they've completed.
     pass!(s.assign_message_slots());
+    pass!(s.insert_required_waits());
     pass!(s.mark_reconvergence());
-    pass!(s.opt_end());
+    pass!(s.opt_flow());
 
-    if !s.is_empty() {
+    let stats = if !s.is_empty() {
+        let mut stats = s.get_stats();
+        pass!(s.lower_blend_call());
+
         let bin = model.encode_shader(&s);
+        if DEBUG.contains(DebugFlags::PRINT) {
+            print_disassembly(&bin, model.arch());
+        }
+
         let code_size = std::mem::size_of_val(&bin[..]);
         dynarray_append_vec(binary, bin);
 
-        encode_no_psiz_variant(nir, &mut s, model.as_ref(), binary, info);
+        encode_no_psiz_variant(nir, &mut s, model.as_ref(), binary, info, idvs);
 
-        info.stats = s.get_stats(code_size.try_into().unwrap());
+        if stats.isa == PAN_STAT_VALHALL {
+            stats.__bindgen_anon_1.valhall.code_size =
+                code_size.try_into().unwrap();
+        } else {
+            panic!("Unsupported ISA");
+        }
+        stats
     } else {
-        info.stats = pan_stats::default();
+        pan_stats {
+            isa: PAN_STAT_VALHALL,
+            __bindgen_anon_1: pan_stats__bindgen_ty_1 {
+                valhall: valhall_stats::default(),
+            },
+        }
+    };
+
+    if idvs == KRAID_IDVS_VARYING {
+        info.stats_idvs_varying = stats;
+    } else {
+        info.stats = stats;
     }
 
-    write_back_info(&s.info, nir, info);
-    unsafe { pan_shader_update_info(info, nir, inputs) };
+    write_back_info(model.as_ref(), &s.info, nir, info, idvs);
+    unsafe { pan_shader_update_info(info, nir, model.arch().into()) };
+
+    if DEBUG.contains(DebugFlags::STATS) {
+        let mut stream = MemStream::new().expect("Failed to open memstream");
+
+        unsafe {
+            // Both binding crates generate their own stdio FILE, those are the
+            // same type underneath
+            let f = stream.c_file() as *mut kraid_bindings::FILE;
+            let prefix =
+                kraid_shader_stage_name(nir.info.stage(), inputs.is_blend);
+
+            pan_stats_verbose_prologue(f, prefix, inputs.arch, inputs.model);
+            // TODO: min/max statistics
+            pan_valhall_stats_verbose(
+                f,
+                &info.stats.__bindgen_anon_1.valhall,
+                std::ptr::null(),
+                std::ptr::null(),
+                info.tls_size,
+            );
+            pan_stats_verbose_epilogue(f, info);
+        }
+
+        eprint!("{}", stream.take_utf8_string_lossy().unwrap());
+    }
 }

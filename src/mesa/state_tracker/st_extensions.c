@@ -115,7 +115,7 @@ static unsigned mesa_to_gl_stages(unsigned stages)
  */
 void st_init_limits(struct pipe_screen *screen,
                     struct gl_constants *c, struct gl_extensions *extensions,
-                    gl_api api)
+                    struct st_config_options *options, gl_api api)
 {
    mesa_shader_stage sh;
    bool can_ubo = true;
@@ -123,6 +123,14 @@ void st_init_limits(struct pipe_screen *screen,
 
    c->MaxTextureSize = screen->caps.max_texture_2d_size;
    c->MaxTextureSize = MIN2(c->MaxTextureSize, 1 << (MAX_TEXTURE_LEVELS - 1));
+
+   /* Some applications can't cope with the texture size we advertise, e.g. by
+    * storing it in a 16-bit type, where 65536 becomes 0. Let drirc lower it.
+    * The rectangle, viewport and renderbuffer limits are derived from this
+    * below, so they are limited as well.
+    */
+   if (options->limit_max_texture_size)
+      c->MaxTextureSize = MIN2(c->MaxTextureSize, options->limit_max_texture_size);
 
    c->Max3DTextureLevels
       = _min(screen->caps.max_texture_3d_levels,
@@ -132,6 +140,12 @@ void st_init_limits(struct pipe_screen *screen,
    c->MaxCubeTextureLevels
       = _min(screen->caps.max_texture_cube_levels,
             MAX_TEXTURE_LEVELS);
+
+   if (options->limit_max_texture_size) {
+      c->MaxCubeTextureLevels =
+         _min(c->MaxCubeTextureLevels,
+              util_logbase2(options->limit_max_texture_size) + 1);
+   }
 
    c->MaxTextureRectSize = _min(c->MaxTextureSize, MAX_TEXTURE_RECT_SIZE);
 
@@ -552,16 +566,19 @@ void st_init_limits(struct pipe_screen *screen,
          extensions->ARB_shader_storage_buffer_object = GL_TRUE;
    }
 
-   c->MaxCombinedImageUniforms = MAX3(
-      c->Program[MESA_SHADER_VERTEX].MaxImageUniforms +
-      c->Program[MESA_SHADER_TESS_CTRL].MaxImageUniforms +
-      c->Program[MESA_SHADER_TESS_EVAL].MaxImageUniforms +
-      c->Program[MESA_SHADER_GEOMETRY].MaxImageUniforms +
-      c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
-      c->Program[MESA_SHADER_TASK].MaxImageUniforms +
-      c->Program[MESA_SHADER_MESH].MaxImageUniforms +
-      c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
-      c->Program[MESA_SHADER_COMPUTE].MaxImageUniforms);
+   c->MaxCombinedImageUniforms =
+      likely(!screen->caps.max_combined_image_uniforms) ?
+      MAX3(
+         c->Program[MESA_SHADER_VERTEX].MaxImageUniforms +
+         c->Program[MESA_SHADER_TESS_CTRL].MaxImageUniforms +
+         c->Program[MESA_SHADER_TESS_EVAL].MaxImageUniforms +
+         c->Program[MESA_SHADER_GEOMETRY].MaxImageUniforms +
+         c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
+         c->Program[MESA_SHADER_TASK].MaxImageUniforms +
+         c->Program[MESA_SHADER_MESH].MaxImageUniforms +
+         c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms,
+         c->Program[MESA_SHADER_COMPUTE].MaxImageUniforms) :
+      screen->caps.max_combined_image_uniforms;
    c->MaxCombinedShaderOutputResources += c->MaxCombinedImageUniforms;
    c->MaxImageUnits = MAX_IMAGE_UNITS;
    if (c->Program[MESA_SHADER_FRAGMENT].MaxImageUniforms &&
@@ -1163,6 +1180,7 @@ void st_init_extensions(struct pipe_screen *screen,
    EXT_CAP(OES_texture_view,                 sampler_view_target);
    EXT_CAP(INTEL_blackhole_render,           frontend_noop);
    EXT_CAP(ARM_shader_framebuffer_fetch_depth_stencil, fbfetch_zs);
+   EXT_CAP(MESA_map_buffer_client_pointer,   map_client_pointer);
    EXT_CAP(MESA_texture_const_bandwidth,     has_const_bw);
 
 #undef EXT_CAP
@@ -1628,7 +1646,10 @@ void st_init_extensions(struct pipe_screen *screen,
    unsigned max_fb_fetch_rts = screen->caps.fbfetch;
    bool coherent_fb_fetch = screen->caps.fbfetch_coherent;
 
-   if (screen->caps.blend_equation_advanced)
+   consts->NativeAdvancedBlendModes = screen->caps.blend_equation_advanced;
+
+   if ((screen->caps.blend_equation_advanced &
+        PIPE_ADVANCED_BLEND_KHR_MODES_MASK) == PIPE_ADVANCED_BLEND_KHR_MODES_MASK)
       extensions->KHR_blend_equation_advanced = true;
 
    if (max_fb_fetch_rts > 0) {

@@ -283,13 +283,15 @@ struct st_fp_variant_key
    GLuint lower_flatshade:1;
    unsigned lower_alpha_func:3;
 
+   GLuint lower_polygon_stipple:1;
+
    /** needed for ATI_fragment_shader */
    uint8_t texture_index[MAX_NUM_FRAGMENT_REGISTERS_ATI];
 
    struct st_external_sampler_key external;
 
    /* bitmask of sampler units; pipe_caps.gl_clamp */
-   uint32_t gl_clamp[3];
+   uint32_t gl_clamp[4];
 
    /* bitmask of shadow samplers with depth textures in them for ARB programs; */
    GLbitfield depth_textures;
@@ -325,6 +327,12 @@ struct st_fp_variant
    /** For glDrawPixels variants */
    unsigned drawpix_sampler;
    unsigned pixelmap_sampler;
+
+   /**
+    * For emulated polygon stipple variants: the sampler/texture unit used by
+    * the stipple texture, or -1 if this variant doesn't emulate stipple.
+    */
+   int stipple_sampler;
 };
 
 
@@ -352,7 +360,7 @@ struct st_common_variant_key
    bool is_draw_shader;
 
    /* bitmask of sampler units; pipe_caps.gl_clamp */
-   uint32_t gl_clamp[3];
+   uint32_t gl_clamp[4];
 };
 
 
@@ -393,7 +401,7 @@ st_get_generic_varying_index(struct st_context *st, GLuint attr)
 }
 
 extern void
-st_set_prog_affected_state_flags(struct gl_program *prog);
+st_set_prog_affected_state_flags(struct st_context *st, struct gl_program *prog);
 
 
 extern struct st_fp_variant *

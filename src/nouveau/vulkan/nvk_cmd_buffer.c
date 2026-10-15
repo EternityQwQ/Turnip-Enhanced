@@ -38,7 +38,7 @@
 static uint8_t
 nvk_cmd_buffer_subchannel_mask(struct nvk_cmd_buffer *cmd);
 
-static void
+void
 nvk_descriptor_state_fini(struct nvk_cmd_buffer *cmd,
                           struct nvk_descriptor_state *desc)
 {
@@ -200,7 +200,7 @@ nvk_cmd_buffer_flush_push(struct nvk_cmd_buffer *cmd, bool incomplete)
       };
       util_dynarray_append(&cmd->pushes, push);
 
-      cmd->prev_subc = NVC0_FIFO_SUBC_FROM_PKHDR(cmd->push.last_hdr_dw);
+      cmd->prev_subc = nvk_cmd_buffer_last_subchannel(cmd);
    }
 
    cmd->push.start = cmd->push.end;
@@ -365,11 +365,6 @@ nvk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    if (cmd->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY)
       cmd->state.inherited_pipeline_statistics =
          pBeginInfo->pInheritanceInfo->pipelineStatistics;
-
-   /* Start with a nop so we have at least something to submit */
-   struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
-   P_MTHD(p, NV90B5, NOP);
-   P_NV90B5_NOP(p, 0);
 
    if (queue_flags & VK_QUEUE_COMPUTE_BIT)
       nvk_cmd_buffer_begin_compute(cmd, pBeginInfo);

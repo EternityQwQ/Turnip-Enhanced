@@ -8,12 +8,53 @@
 #include "va_compiler.h"
 #include "valhall.h"
 
-void
-va_count_instr_stats(bi_instr *I, struct va_stats *stats)
+static unsigned
+va_instr_exec_time(bi_instr *I, unsigned arch)
 {
-   /* Adjusted for 64-bit arithmetic */
-   unsigned words = bi_count_write_registers(I, 0);
+   switch (I->op) {
+   /* CLPER and FROUND.f32 became two-word ops at v11 */
+   case BI_OPCODE_CLPER_I32:
+   case BI_OPCODE_FROUND_F32:
+      return arch >= 11 ? 2 : 1;
 
+   /* MMUL always takes 4 cycles */
+   case BI_OPCODE_MMUL_F32:
+   case BI_OPCODE_MMUL_V2F16:
+   case BI_OPCODE_MMUL_V4S8:
+   case BI_OPCODE_MMUL_V4U8:
+      return 4;
+
+   default:
+      return 1;
+   }
+}
+
+static enum va_unit
+va_arch_adjusted_unit(bi_instr *I, unsigned arch)
+{
+   switch (I->op) {
+   /* 32-bit shift ops moved from SFU to CVT at v11 */
+   case BI_OPCODE_LSHIFT_AND_I32:
+   case BI_OPCODE_LSHIFT_OR_I32:
+   case BI_OPCODE_LSHIFT_XOR_I32:
+   case BI_OPCODE_RSHIFT_AND_I32:
+   case BI_OPCODE_RSHIFT_OR_I32:
+   case BI_OPCODE_RSHIFT_XOR_I32:
+   case BI_OPCODE_CLPER_I32:
+      return arch >= 11 ? VA_UNIT_CVT : VA_UNIT_SFU;
+
+   /* FROUND.f32 moved from CVT to FMA at v11, */
+   case BI_OPCODE_FROUND_F32:
+      return arch >= 11 ? VA_UNIT_FMA : VA_UNIT_CVT;
+
+   default:
+      return valhall_opcodes[I->op].unit;
+   }
+}
+
+void
+va_count_instr_stats(bi_instr *I, struct va_stats *stats, unsigned arch)
+{
    bi_foreach_dest(I, d) {
       if (I->dest[d].type == BI_INDEX_REGISTER)
          stats->reg_mask |= (uint64_t)bi_writemask(I, d) << I->dest[d].value;
@@ -35,18 +76,23 @@ va_count_instr_stats(bi_instr *I, struct va_stats *stats)
          }
       }
    }
-   switch (valhall_opcodes[I->op].unit) {
+
+   /* Adjusted for 64-bit arithmetic */
+   unsigned words = bi_count_write_registers(I, 0);
+   unsigned cycles = words * va_instr_exec_time(I, arch);
+
+   switch (va_arch_adjusted_unit(I, arch)) {
    /* Arithmetic is 2x slower for 64-bit than 32-bit */
    case VA_UNIT_FMA:
-      stats->fma += words;
+      stats->fma += cycles;
       return;
 
    case VA_UNIT_CVT:
-      stats->cvt += words;
+      stats->cvt += cycles;
       return;
 
    case VA_UNIT_SFU:
-      stats->sfu += words;
+      stats->sfu += cycles;
       return;
 
    /* Varying is counted int loaded 32-bit components */
