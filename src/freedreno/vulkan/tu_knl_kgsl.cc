@@ -142,7 +142,7 @@ kgsl_submitqueue_destroy(struct tu_device *dev, struct tu_queue *queue)
 static int
 kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
 {
-   if (queue->priority >= dev->submitqueue_priority_count)
+   if (queue->priority >= dev->physical_device->submitqueue_priority_count)
       return -EINVAL;
 
    queue->kgsl_queue_timeline_id = 0;
