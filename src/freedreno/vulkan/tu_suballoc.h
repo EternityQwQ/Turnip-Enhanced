@@ -22,6 +22,9 @@ struct tu_suballocator
 
    uint32_t default_size;
    enum tu_bo_alloc_flags flags;
+   /* When true, new BOs use tu_bo_init_new_cached (CPU-polled data like
+    * events/autotune); otherwise WC via tu_bo_init_new. Default false. */
+   bool use_cached;
 
    /** Current BO we're suballocating out of. */
    struct tu_bo *bo;
@@ -55,6 +58,12 @@ tu_bo_suballocator_init(struct tu_suballocator *suballoc,
                         uint32_t default_size,
                         enum tu_bo_alloc_flags flags,
                         const char *name);
+void
+tu_bo_suballocator_init_cached(struct tu_suballocator *suballoc,
+                               struct tu_device *dev,
+                               uint32_t default_size,
+                               enum tu_bo_alloc_flags flags,
+                               const char *name);
 void
 tu_bo_suballocator_finish(struct tu_suballocator *suballoc);
 

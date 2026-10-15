@@ -1709,7 +1709,10 @@ tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_c
 tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
     : device(device), supported_mod_flags(get_supported_mod_flags(device)), active_config(get_env_config())
 {
-   tu_bo_suballocator_init(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
+   /* CPU reads back tuning counters every submit: cached-coherent when
+    * available, same rationale as event_suballoc. Falls back to WC where
+    * the kernel lacks cached-coherent support. */
+   tu_bo_suballocator_init_cached(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
 
    if (supports_preempt_latency_tracking()) {
       const char *fail_reason = nullptr;

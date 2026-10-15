@@ -529,6 +529,11 @@ struct tu_cmd_state
     uint32_t last_cs_blocks[3];
     bool has_last_cs_blocks;
     uint64_t last_cs_driver_iova;
+    /* Draw initiator cache: key packs topology/patch/index/GS/TES/src_sel.
+     * state memset in Begin clears valid=false, no extra reset needed. */
+    uint32_t last_initiator;
+    uint32_t last_initiator_key[4];
+    bool has_last_initiator;
 
    struct tu_draw_state vs_params;
    struct tu_draw_state fs_params;

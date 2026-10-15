@@ -2283,14 +2283,17 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
       mtx_unlock(&queue->device->kgsl_profiling_mutex);
    }
 
-   uint32_t obj_count = 0;
-   if (u_trace_submission_data)
-      obj_count++;
+    uint32_t obj_count = 0;
+    if (u_trace_submission_data)
+       obj_count++;
 
-   struct kgsl_command_object *objs = (struct kgsl_command_object *)
-      vk_alloc(&queue->device->vk.alloc, sizeof(*objs) * obj_count,
-               alignof(struct kgsl_command_object),
-               VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
+    /* Only 0-1 objects (one profiling entry when tracing): keep it on
+     * the stack to avoid vk_alloc/vk_free per traced submit. No heap
+     * path: obj_count cannot exceed 1, so no OOM goto that would cross
+     * the initializations below (ill-formed C++, see e3ea98b4). */
+    assert(obj_count <= 1);
+    struct kgsl_command_object stack_obj;
+    struct kgsl_command_object *objs = obj_count ? &stack_obj : NULL;
 
    struct kgsl_cmdbatch_profiling_buffer *profiling_buffer = NULL;
    uint32_t obj_idx = 0;
@@ -2507,11 +2510,11 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
       submission_data->gpu_ts_offset = gpu_offset;
    }
 
- fail_submit:
+  fail_submit:
     STACK_ARRAY_FINISH(wait_semaphores);
-    /* objs is submit-scoped: free it on both success and failure; it was
-     * previously leaked on every traced submit. */
-    vk_free(&queue->device->vk.alloc, objs);
+    /* objs lives on the stack (0-1 entries, never heap): nothing to free.
+     * Previously vk_alloc'd per traced submit and leaked; stack removes
+     * both the leak and the free. */
     if (result != VK_SUCCESS && u_trace_submission_data) {
       mtx_lock(&queue->device->kgsl_profiling_mutex);
       tu_suballoc_bo_free(&queue->device->kgsl_profiling_suballoc,
