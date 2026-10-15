@@ -712,8 +712,8 @@ msm_bo_init(struct tu_device *dev,
 
     /* SET_NAME is a debug-only ioctl: skip it unless BO names are actually
      * tracked (TU_DEBUG=bos). Saves one ioctl per BO allocation. */
-    if (unlikely(dev->bo_sizes))
-       tu_bo_set_kernel_name(dev, bo, name);
+   if (unlikely(dev->bo_sizes))
+      msm_common_bo_set_name(dev->fd, bo->gem_handle, name, strlen(name));
 
    if (result == VK_SUCCESS &&
        (mem_property & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) &&

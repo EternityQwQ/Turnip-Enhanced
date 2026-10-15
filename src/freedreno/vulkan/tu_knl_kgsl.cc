@@ -142,13 +142,12 @@ kgsl_submitqueue_destroy(struct tu_device *dev, struct tu_queue *queue)
 static int
 kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
 {
-   if (queue->priority >= ARRAY_SIZE(kgsl_context_priorities))
+   if (queue->priority >= dev->submitqueue_priority_count)
       return -EINVAL;
 
    queue->kgsl_queue_timeline_id = 0;
    queue->kgsl_queue_timeline_seqno = 0;
 
-   const uint32_t priority = kgsl_context_priorities[queue->priority];
    struct kgsl_drawctxt_create req = {
       .flags = KGSL_CONTEXT_SAVE_GMEM |
               KGSL_CONTEXT_NO_GMEM_ALLOC |
@@ -2141,6 +2140,7 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
     }
 
     VkResult result = VK_SUCCESS;
+   bool profiling_submitted = false;
 
    /* The semaphore array size depends only on the inputs: allocate and
     * validate it before acquiring any resources below, so the OOM path
@@ -2157,11 +2157,6 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
 
    if (submit->bind_cmds.size != 0)
       kgsl_bind_finalize(submit);
-
-   const struct kgsl_syncobj *wait_semaphores[wait_count];
-   for (uint32_t i = 0; i < wait_count; i++) {
-      wait_semaphores[i] = &container_of(waits[i].sync, struct vk_kgsl_syncobj, vk)->syncobj;
-   }
 
    struct kgsl_syncobj wait_sync;
    result = kgsl_syncobj_merge(queue->device, wait_semaphores, wait_count, &wait_sync);
@@ -2192,6 +2187,8 @@ kgsl_queue_submit_syncobj(struct tu_queue *queue, void *_submit,
     assert(obj_count <= 1);
     struct kgsl_command_object stack_obj;
     struct kgsl_command_object *objs = obj_count ? &stack_obj : NULL;
+
+   struct kgsl_command_object profile_obj = { 0 };
 
    struct kgsl_cmdbatch_profiling_buffer *profiling_buffer = NULL;
    if (u_trace_submission_data) {
@@ -3017,7 +3014,7 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
 
    device->has_raytracing = tu_kgsl_get_raytracing(fd);
 
-   device->submitqueue_priority_count = ARRAY_SIZE(kgsl_context_priorities);
+   device->submitqueue_priority_count = 1;
 
    /* Prefer timeline-based sync implementation if supported by the kernel. */
    if (kgsl_timeline_create_ioctl(fd, 0, &dummy_timeline_id) == 0) {
