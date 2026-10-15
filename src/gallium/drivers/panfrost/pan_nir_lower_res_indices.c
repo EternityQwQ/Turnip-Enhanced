@@ -23,20 +23,20 @@ mid_image_offset(nir_shader *nir)
 }
 
 static unsigned
-mid_texel_buffer_offset(nir_shader *nir, uint64_t gpu_id)
+mid_texel_buffer_offset(nir_shader *nir, unsigned arch)
 {
    /* Bifrost needs to use attributes to access texel buffers. We place these
     * after images, which are also accessed using attributes.
     */
-   assert(pan_arch(gpu_id) <= 7);
-   if (pan_arch(gpu_id) >= 6)
+   assert(arch <= 7);
+   if (arch >= 6)
       return mid_image_offset(nir) + BITSET_LAST_BIT(nir->info.images_used);
    else
       return 0;
 }
 
 static bool
-mid_lower_tex(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
+mid_lower_tex(nir_builder *b, nir_tex_instr *tex, unsigned arch)
 {
    if (tex->sampler_dim != GLSL_SAMPLER_DIM_BUF)
       return false;
@@ -49,7 +49,7 @@ mid_lower_tex(nir_builder *b, nir_tex_instr *tex, uint64_t gpu_id)
    if (tex->op != nir_texop_txf)
       return false;
 
-   unsigned tex_offset = mid_texel_buffer_offset(b->shader, gpu_id);
+   unsigned tex_offset = mid_texel_buffer_offset(b->shader, arch);
    if (tex_offset == 0)
       return false;
 
@@ -101,11 +101,11 @@ mid_lower_intrinsic(nir_builder *b, nir_intrinsic_instr *intrin)
 static bool
 mid_lower_instr(nir_builder *b, nir_instr *instr, void *data)
 {
-   uint64_t gpu_id = *(uint64_t *)data;
+   unsigned arch = *(unsigned *)data;
 
    switch (instr->type) {
    case nir_instr_type_tex:
-      return mid_lower_tex(b, nir_instr_as_tex(instr), gpu_id);
+      return mid_lower_tex(b, nir_instr_as_tex(instr), arch);
    case nir_instr_type_intrinsic:
       return mid_lower_intrinsic(b, nir_instr_as_intrinsic(instr));
    default:
@@ -114,11 +114,11 @@ mid_lower_instr(nir_builder *b, nir_instr *instr, void *data)
 }
 
 static bool
-mid_lower_res_indices(nir_shader *shader, uint64_t gpu_id)
+mid_lower_res_indices(nir_shader *shader, unsigned arch)
 {
    return nir_shader_instructions_pass(shader, mid_lower_instr,
                                        nir_metadata_control_flow,
-                                       &gpu_id);
+                                       &arch);
 }
 
 static bool
@@ -260,10 +260,10 @@ va_lower_res_indices(nir_shader *shader)
 }
 
 bool
-panfrost_nir_lower_res_indices(nir_shader *shader, uint64_t gpu_id)
+panfrost_nir_lower_res_indices(nir_shader *shader, unsigned arch)
 {
-   if (pan_arch(gpu_id) >= 9)
+   if (arch >= 9)
       return va_lower_res_indices(shader);
    else
-      return mid_lower_res_indices(shader, gpu_id);
+      return mid_lower_res_indices(shader, arch);
 }

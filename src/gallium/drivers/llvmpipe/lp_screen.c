@@ -804,6 +804,9 @@ llvmpipe_destroy_screen(struct pipe_screen *_screen)
     */
    llvmpipe_screen_destroy_setup_cache(screen);
 
+   if (screen->late_init_done)
+      llvmpipe_sampler_matrix_destroy(screen);
+
    lp_jit_screen_cleanup(screen);
 
    lp_context_destroy(&screen->llvm_context);
@@ -897,9 +900,13 @@ lp_disk_cache_create(struct llvmpipe_screen *screen)
    char cache_id[BLAKE3_HEX_LEN];
    _mesa_blake3_init(&ctx);
 
-   if (!disk_cache_get_function_identifier(lp_disk_cache_create, &ctx) ||
-       !disk_cache_get_function_identifier(LLVMLinkInMCJIT, &ctx))
+   if (!disk_cache_get_function_identifier(lp_disk_cache_create, &ctx))
       return;
+
+#if !GALLIVM_USE_ORCJIT
+   if (!disk_cache_get_function_identifier(LLVMLinkInMCJIT, &ctx))
+      return;
+#endif
 
    _mesa_blake3_update(&ctx, &gallivm_perf, sizeof(gallivm_perf));
    update_cache_blake3_cpu(&ctx);
@@ -1001,12 +1008,25 @@ llvmpipe_screen_late_init(struct llvmpipe_screen *screen)
    lp_build_init(); /* get lp_native_vector_width initialised */
 
    lp_disk_cache_create(screen);
+
+   llvmpipe_init_sampler_matrix(screen);
+
    screen->late_init_done = true;
 out:
    mtx_unlock(&screen->late_mutex);
    return ret;
 }
 
+uint64_t
+llvmpipe_get_mem_file_size(struct pipe_screen *_screen)
+{
+#if DETECT_OS_LINUX
+   struct llvmpipe_screen *screen = llvmpipe_screen(_screen);
+   return screen->mem_file_size;
+#else
+   return 0;
+#endif
+}
 
 /**
  * Create a new pipe_screen object

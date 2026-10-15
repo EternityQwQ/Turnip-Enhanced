@@ -269,9 +269,17 @@ ir3_shader_compute_state_create(struct pipe_context *pctx,
    enum ir3_wavesize_option api_wavesize = IR3_SINGLE_OR_DOUBLE;
    enum ir3_wavesize_option real_wavesize = IR3_SINGLE_OR_DOUBLE;
 
-   if (ctx->screen->gen >= 6 && !ctx->screen->info->props.supports_double_threadsize) {
-      api_wavesize = IR3_SINGLE_ONLY;
-      real_wavesize = IR3_SINGLE_ONLY;
+   if (ctx->screen->gen >= 6) {
+      if (!ctx->screen->info->props.supports_double_threadsize) {
+         api_wavesize = IR3_SINGLE_ONLY;
+         real_wavesize = IR3_SINGLE_ONLY;
+      } else {
+         /* GL has no ALLOW_VARYING_SUBGROUP_SIZE_BIT. Match Turnip's fixed-
+          * subgroup-size path: set api_wavesize to IR3_DOUBLE_ONLY so
+          * nir_lower_subgroups bakes GL_SUBGROUP_SIZE_KHR as a constant.
+          */
+         api_wavesize = IR3_DOUBLE_ONLY;
+      }
    }
 
    const struct ir3_shader_options ir3_options = {

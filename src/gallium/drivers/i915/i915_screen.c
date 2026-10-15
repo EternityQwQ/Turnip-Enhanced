@@ -313,6 +313,7 @@ i915_init_screen_caps(struct i915_screen *is)
    caps->user_vertex_buffers = true;
    caps->mixed_color_depth_bits = true;
    caps->tgsi_texcoord = true;
+   caps->polygon_stipple = true;
 
    caps->texture_transfer_modes =
    caps->pci_group =
@@ -354,7 +355,6 @@ i915_init_screen_caps(struct i915_screen *is)
    caps->fs_coord_origin_upper_left =
    caps->fs_coord_pixel_center_half_integer = true;
    caps->device_type = PIPE_DEVICE_TYPE_INTEGRATED_GPU;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->max_varyings = 10;
 
    caps->nir_images_as_deref = false;

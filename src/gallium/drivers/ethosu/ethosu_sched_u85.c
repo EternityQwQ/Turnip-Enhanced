@@ -309,10 +309,8 @@ area_fit_u85(struct find_config_common common,
       }
 
       /* Nothing fitted at this depth */
-      if (!fitted) {
-         mesa_loge("area_fit_u85: no solution found");
+      if (!fitted)
          break;
-      }
    }
 
    return fit_shape;
@@ -609,11 +607,12 @@ find_ublock(struct ethosu_operation *operation, bool is_part_kernel)
                         operation->kernel.width == 1 && operation->kernel.height == 1);
    bool is_depthwise = operation->conv.depthwise;
    bool is_pooling = (operation->type == ETHOSU_OPERATION_TYPE_POOLING);
-   bool is_memory_copy_pooling = is_pooling &&
-                                 operation->kernel.width == 1 &&
-                                 operation->kernel.height == 1;
    bool is_reduce_sum =
       is_pooling && operation->pooling.type == ETHOSU_POOLING_TYPE_REDUCE_SUM;
+   bool is_memory_copy_pooling = is_pooling &&
+                                 !is_reduce_sum &&
+                                 operation->kernel.width == 1 &&
+                                 operation->kernel.height == 1;
    unsigned ifm_bits = 8 << operation->ifm.precision;
 
    /* For memory-copy pooling (1x1 pooling), always use 2x1x16 ublock
@@ -748,7 +747,10 @@ find_block_config_u85(struct ethosu_subgraph *subgraph, struct ethosu_operation 
 
    /* Handle depthwise/pooling operations
     * Exception: 1x1 pooling (memory copy) uses full block search instead */
+   bool is_reduce_sum =
+      is_pooling && operation->pooling.type == ETHOSU_POOLING_TYPE_REDUCE_SUM;
    bool is_memory_copy_pooling = is_pooling &&
+                                 !is_reduce_sum &&
                                  operation->kernel.width == 1 &&
                                  operation->kernel.height == 1;
 
