@@ -456,8 +456,8 @@ tu_cs_reserve(struct tu_cs *cs, uint32_t reserved_size)
       return;
    }
 
-   if (tu_cs_get_space(cs) >= reserved_size &&
-       cs->entry_count < cs->entry_capacity) {
+   if (likely(tu_cs_get_space(cs) >= reserved_size &&
+        cs->entry_count < cs->entry_capacity)) {
       cs->reserved_end = cs->cur + reserved_size;
       return;
    }

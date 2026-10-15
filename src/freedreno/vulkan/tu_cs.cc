@@ -43,6 +43,10 @@ tu_cs_init(struct tu_cs *cs,
          malloc(32 * sizeof(struct tu_cs_entry)));
       if (cs->entries)
          cs->entry_capacity = 32;
+      cs->read_only.bos = static_cast<struct tu_bo **>(
+         malloc(4 * sizeof(struct tu_bo *)));
+      if (cs->read_only.bos)
+         cs->read_only.bo_capacity = 4;
    }
 }
 
