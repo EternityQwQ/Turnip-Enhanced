@@ -129,7 +129,7 @@ jay_send_src_latency(jay_shader *s, jay_inst *I)
 static unsigned
 jay_occupancy(jay_shader *s, jay_inst *I)
 {
-   unsigned exec_size = jay_simd_width_logical(s, I);
+   unsigned exec_size = jay_simd_width_logical(s, I) >> I->simd_split;
    unsigned native = jay_ugpr_per_grf(s);
    uint16_t scale = (exec_size <= native)     ? 1 :
                     (exec_size == native * 2) ? 2 :
@@ -298,11 +298,10 @@ estimate_block_cycles(jay_function *f, jay_block *block)
 unsigned
 jay_estimate_cycles(jay_function *f)
 {
-   unsigned cycles = 0;
+   float cycles = 0;
 
    jay_foreach_block(f, block) {
-      /* TODO: Scale by block repetition */
-      cycles += estimate_block_cycles(f, block);
+      cycles += block->weight * (float) estimate_block_cycles(f, block);
    }
 
    return cycles;

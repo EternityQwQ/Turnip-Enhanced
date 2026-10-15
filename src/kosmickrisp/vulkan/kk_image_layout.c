@@ -132,9 +132,6 @@ kk_image_layout_calc_linear(const struct kk_device *dev,
    layout->layer_stride_B = layout->linear_stride_B * layout->height_px;
    /* Metal only allows for 2D texture with no mipmapping. */
    layout->size_B = layout->layer_stride_B;
-   layout->level_offsets_B[0] = 0;
-   /* We add the end offset so we can easily recover the size of a level */
-   layout->level_offsets_B[1] = layout->layer_stride_B;
 }
 
 static void
@@ -161,53 +158,6 @@ kk_image_layout_calc_tiled(const struct kk_device *dev,
 
    /* Layer stride times number of layers should equal total size. */
    assert(layout->layer_stride_B * layout->layers == layout->size_B);
-
-   /* Stop here if level offsets are not validated for below calculations */
-   if (!kk_image_layout_level_offsets_defined(layout))
-      return;
-
-   struct kk_image_layout calc_layout = *layout;
-   calc_layout.layers = 1;
-   calc_layout.levels = 1;
-
-   /* Default sparse tile size follows regular tile size */
-   uint32_t tile_size_B = mtl_sparse_tile_size_in_bytes(dev->mtl_handle);
-   struct mtl_size tile_size_el =
-      mtl_sparse_tile_size(dev->mtl_handle, &calc_layout);
-   struct mtl_size tile_count =
-      mtl_sparse_tile_count(dev->mtl_handle, &calc_layout, tile_size_el);
-
-   layout->level_offsets_B[0] = 0;
-
-   /* We also add the end offset so we can easily recover the size of a level */
-   assert(layout->levels < ARRAY_SIZE(layout->level_offsets_B));
-
-   for (uint8_t level = 0; level < layout->levels; ++level) {
-      calc_layout.width_px = u_minify(layout->width_px, level);
-      calc_layout.height_px = u_minify(layout->height_px, level);
-      calc_layout.depth_px = u_minify(layout->depth_px, level);
-
-      uint64_t level_size;
-      mtl_heap_texture_size_and_align_with_descriptor(
-         dev->mtl_handle, &calc_layout, &level_size, NULL);
-
-      /* Based on HoneyKrisp layout calculations. There may be a padding corner
-       * tile, which appears to be excluded by Metal calculations when querying
-       * for a single mip level. Add its size on if needed. */
-      uint32_t mip_tiles = (tile_count.x * tile_count.y) >> (level * 2);
-      bool pad_left = tile_count.x & BITFIELD_MASK(level);
-      bool pad_bottom = tile_count.y & BITFIELD_MASK(level);
-      bool pad_corner = pad_left && pad_bottom;
-      if (mip_tiles != 0 && pad_corner)
-         level_size += tile_size_B;
-
-      layout->level_offsets_B[level + 1] =
-         layout->level_offsets_B[level] + level_size;
-   }
-
-   /* End of last mip level should never exceed layer stride, but may be less
-    * due to extra padding */
-   assert(layout->level_offsets_B[layout->levels] <= layout->layer_stride_B);
 }
 
 void
@@ -251,4 +201,69 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
    } else {
       kk_image_layout_calc_tiled(dev, layout);
    }
+}
+
+void
+kk_image_layout_init_level_offsets(const struct kk_device *dev,
+                                   struct kk_image_layout *layout,
+                                   mtl_texture *texture)
+{
+   /* Skip if level offsets are not validated for below calculations */
+   if (!kk_image_layout_level_offsets_defined(layout))
+      return;
+
+   if (layout->linear) {
+      /* We only support one level for linear textures */
+      layout->level_offsets_B[0] = 0;
+      layout->level_offsets_B[1] = layout->layer_stride_B;
+      return;
+   }
+
+   struct kk_image_layout calc_layout = *layout;
+   calc_layout.layers = 1;
+   calc_layout.levels = 1;
+
+   /* Default sparse tile size follows regular tile size */
+   uint32_t tile_size_B = mtl_sparse_tile_size_in_bytes(dev->mtl_handle);
+   struct mtl_size tile_size_el =
+      mtl_sparse_tile_size(dev->mtl_handle, &calc_layout);
+   struct mtl_size tile_count =
+      mtl_sparse_tile_count(dev->mtl_handle, &calc_layout, tile_size_el);
+
+   layout->level_offsets_B[0] = 0;
+
+   /* We also add the end offset so we can easily recover the size of a level */
+   assert(layout->levels < ARRAY_SIZE(layout->level_offsets_B));
+
+   uint32_t pot_level = mtl_texture_first_mipmap_in_tail(texture);
+
+   for (uint8_t level = 0; level < layout->levels; ++level) {
+      calc_layout.width_px = u_minify(layout->width_px, level);
+      calc_layout.height_px = u_minify(layout->height_px, level);
+      calc_layout.depth_px = u_minify(layout->depth_px, level);
+
+      uint64_t level_size;
+      mtl_heap_texture_size_and_align_with_descriptor(
+         dev->mtl_handle, &calc_layout, &level_size, NULL);
+
+      /* Based on HoneyKrisp layout calculations. There may be a padding corner
+       * tile, which appears to be excluded by Metal calculations when querying
+       * for a single mip level. Add its size on if needed. This only applies
+       * to mip levels before the tail. */
+      if (level < pot_level) {
+         uint32_t mip_tiles = (tile_count.x * tile_count.y) >> (level * 2);
+         bool pad_left = tile_count.x & BITFIELD_MASK(level);
+         bool pad_bottom = tile_count.y & BITFIELD_MASK(level);
+         bool pad_corner = pad_left && pad_bottom;
+         if (mip_tiles != 0 && pad_corner)
+            level_size += tile_size_B;
+      }
+
+      layout->level_offsets_B[level + 1] =
+         layout->level_offsets_B[level] + level_size;
+   }
+
+   /* End of last mip level should never exceed layer stride, but may be less
+    * due to extra padding */
+   assert(layout->level_offsets_B[layout->levels] <= layout->layer_stride_B);
 }

@@ -313,7 +313,7 @@ get_bvh_layout(const struct vk_acceleration_structure_build_state *state,
       layout->leaf_block_map_offset = offset;
       offset += leaf_block_offset_size;
 
-      uint64_t parent_child_count_map_size = internal_count * sizeof(uint8_t);
+      uint64_t parent_child_count_map_size = (leaf_count + internal_count) * sizeof(uint8_t);
       layout->parent_child_count_map_offset = offset;
       offset += parent_child_count_map_size;
    }
@@ -411,7 +411,7 @@ anv_clear_out_bvh(struct anv_cmd_buffer *cmd_buffer,
 
    anv_cmd_buffer_fill_area(cmd_buffer, anv_bvh_addr, bvh_size, 0 /* data */);
 
-   vk_bvh_build_barrier_compute_to_compute(vk_command_buffer_to_handle(&cmd_buffer->vk), false);
+   vk_bvh_build_barrier_transfer_to_compute(vk_command_buffer_to_handle(&cmd_buffer->vk));
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 }
 
@@ -445,9 +445,15 @@ anv_encode_init_batch(struct anv_cmd_buffer *cmd_buffer,
                       struct vk_acceleration_structure_build_state *states,
                       uint32_t build_count, uint32_t build_flags)
 {
-   struct encode_batch *batch = malloc(sizeof(struct encode_batch) +
-                                build_count * sizeof(struct anv_batch_args) +
-                                build_count * sizeof(struct bvh_desc));
+   struct encode_batch *batch =
+      vk_zalloc(&cmd_buffer->vk.pool->alloc,
+                (sizeof(struct encode_batch) +
+                 build_count * sizeof(struct anv_batch_args) + build_count *
+                 sizeof(struct bvh_desc)), 8U,
+                VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (batch == NULL)
+      return NULL;
+
    batch->max_leaf_count = 0;
    batch->count = 0;
    batch->args = ((struct anv_batch_args *)(batch + 1));
@@ -524,20 +530,16 @@ anv_encode_init_batch(struct anv_cmd_buffer *cmd_buffer,
       batch->max_leaf_count = MAX2(batch->max_leaf_count, state->leaf_node_count);
    }
 
-   struct anv_device *device = cmd_buffer->device;
-   struct anv_bo *bo = NULL;
-
    uint64_t arg_size = batch->count * sizeof(struct anv_batch_args);
-   VkResult result = anv_device_alloc_bo(device, "anv_batch_args", arg_size,
-                                         ANV_BO_ALLOC_MAPPED |
-                                         ANV_BO_ALLOC_HOST_CACHED_COHERENT, 0,
-                                         &bo);
-   if (result != VK_SUCCESS)
-      return batch;
+   struct anv_cmd_alloc alloc = anv_cmd_buffer_alloc_space(cmd_buffer,
+                                                           arg_size, 64, true);
+   if (alloc.map == NULL) {
+      vk_free(&cmd_buffer->vk.pool->alloc, batch);
+      return NULL;
+   }
 
-   struct anv_address dst_addr = { .bo = bo, .offset = 0 };
-   anv_cmd_buffer_update_addr(cmd_buffer, dst_addr, arg_size, batch->args);
-   batch->buffer_pa = anv_address_physical(dst_addr);
+   memcpy(alloc.map, batch->args, arg_size);
+   batch->buffer_pa = anv_address_physical(alloc.address);
 
    return batch;
 }
@@ -594,13 +596,22 @@ anv_encode_as(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct
       device->info->ver >= 20 ? 16 : 8;
 
    struct encode_batch *batch = anv_encode_init_batch(cmd_buffer, states, build_count, build_flags);
-   if (batch->count == 0)
+   if (batch == NULL) {
+      return vk_errorf(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY,
+                       "Failed to allocate AS encode batch");
+   }
+
+   if (batch->count == 0) {
+      vk_free(&cmd_buffer->vk.pool->alloc, batch);
       return VK_SUCCESS;
+   }
+
    if (batch->buffer_pa == 0) {
+      vk_free(&cmd_buffer->vk.pool->alloc, batch);
       return vk_errorf(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY,
                        "Failed to allocate batch buffer for AS encode");
    }
-   vk_bvh_build_barrier_compute_to_compute(commandBuffer, false);
+   vk_bvh_build_barrier_transfer_to_compute(commandBuffer);
 
    anv_bvh_build_bind_pipeline(commandBuffer, ANV_OBJECT_KEY_BVH_ENCODE, encode_spv,
                                sizeof(encode_spv), sizeof(struct encode_args), build_flags);
@@ -617,7 +628,7 @@ anv_encode_as(VkCommandBuffer commandBuffer, struct vk_device *vk_device, struct
    }
 
    trace_intel_end_as_encode(&cmd_buffer->trace, build_flags);
-   free(batch);
+   vk_free(&cmd_buffer->vk.pool->alloc, batch);
    return VK_SUCCESS;
 }
 

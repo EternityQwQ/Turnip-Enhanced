@@ -595,11 +595,6 @@ _mesa_update_texture_renderbuffer(struct gl_context *ctx,
          return;
       }
       att->Renderbuffer = rb;
-
-      /* This can't get called on a texture renderbuffer, so set it to NULL
-       * for clarity compared to user renderbuffers.
-       */
-      rb->AllocStorage = NULL;
    }
 
    if (!texImage)
@@ -1808,7 +1803,6 @@ allocate_renderbuffer_locked(struct gl_context *ctx, GLuint renderbuffer,
       _mesa_error(ctx, GL_OUT_OF_MEMORY, "%s", func);
       return NULL;
    }
-   assert(newRb->AllocStorage);
    _mesa_HashInsertLocked(&ctx->Shared->RenderBuffers, renderbuffer,
                           newRb);
 
@@ -2805,8 +2799,7 @@ _mesa_renderbuffer_storage(struct gl_context *ctx, struct gl_renderbuffer *rb,
    rb->NumStorageSamples = storageSamples;
 
    /* Now allocate the storage */
-   assert(rb->AllocStorage);
-   if (rb->AllocStorage(ctx, rb, internalFormat, width, height)) {
+   if (_mesa_renderbuffer_alloc_storage(ctx, rb, internalFormat, width, height)) {
       /* No error - check/set fields now */
       /* If rb->Format == MESA_FORMAT_NONE, the format is unsupported. */
       assert(rb->Width == (GLuint) width);

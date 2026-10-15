@@ -5,6 +5,7 @@
 
 #include "util/u_math.h"
 #include "jay_ir.h"
+#include "jay_opcodes.h"
 #include "jay_private.h"
 #include "shader_enums.h"
 
@@ -30,6 +31,7 @@
  */
 struct instruction_req {
    unsigned gpr[JAY_NUM_STRIDES];
+   unsigned gpr_split;
    unsigned ugpr;
 };
 
@@ -46,8 +48,22 @@ analyze_per_inst(jay_shader *shader)
          if (!jay_is_null(x)) {
             unsigned size = util_next_power_of_two(jay_num_values(x));
 
-            if (x.file == UGPR) {
+            if (x.file == UGPR && i < 0) {
+               /* Ensure we have enough GRFs for SENDs with uniform dest &
+                * uniform source.
+                */
+               local.ugpr += MAX2(size, jay_dst_alignment(shader, I));
+            } else if (x.file == UGPR && i >= 0) {
                local.ugpr += size;
+            } else if (x.file == GPR &&
+                       I->op == JAY_OPCODE_SEND &&
+                       I->simd_split) {
+               /* We do not currently split other stride sends. If/when that
+                * changes, we'll need to complicate the partition a bit.
+                */
+               assert(jay_src_stride_minmax(I, i, false) == JAY_STRIDE_4);
+               assert(jay_src_stride_minmax(I, i, true) == JAY_STRIDE_4);
+               local.gpr_split += size;
             } else if (x.file == GPR && i >= 0) {
                enum jay_stride min_stride = jay_src_stride_minmax(I, i, false);
                local.gpr[min_stride] += size;
@@ -60,6 +76,7 @@ analyze_per_inst(jay_shader *shader)
 
       /* Take the worst-case for each block */
       global.ugpr = MAX2(global.ugpr, local.ugpr);
+      global.gpr_split = MAX2(global.gpr_split, local.gpr_split);
 
       for (unsigned i = 0; i < ARRAY_SIZE(global.gpr); ++i) {
          global.gpr[i] = MAX2(global.gpr[i], local.gpr[i]);
@@ -79,6 +96,7 @@ struct jay_partition_builder {
    enum jay_stride stride;
    signed len_grf;
    enum jay_block_type type;
+   unsigned split;
 };
 
 static void
@@ -104,10 +122,13 @@ build_partition(jay_shader *shader,
    signed j = -1;
    for (unsigned i = 0; i < n; ++i) {
       struct jay_partition_builder B = b[i];
+      assert(B.len_grf >= 0 && "precondition on partition");
+
       if (j >= 0 &&
           B.file == b[j].file &&
           B.stride == b[j].stride &&
-          B.type == b[j].type) {
+          B.type == b[j].type &&
+          B.split == b[j].split) {
 
          b[j].len_grf += B.len_grf;
       } else if (B.len_grf) {
@@ -128,6 +149,7 @@ build_partition(jay_shader *shader,
          .len_gpr = (b[i].len_grf * p->units_x16[file]) / 16,
          .stride = b[i].stride,
          .type = b[i].type,
+         .split = b[i].split,
       };
 
       if (file < JAY_NUM_GRF_FILES) {
@@ -338,21 +360,11 @@ jay_partition_grf(jay_shader *shader)
       demand[I->dst.file] = MAX2(demand[I->dst.file], end + extra);
    }
 
+   unsigned split_4 = instr_req.gpr_split * grf_per_gpr;
    unsigned uniform_grfs, nonuniform_grfs, hw_grfs;
    unsigned spilling_grfs = 0, mem_slots = 0;
-   unsigned special_4 = payload_4[0] + payload_4[1] + eot_4;
+   unsigned special_4 = payload_4[0] + payload_4[1] + eot_4 + split_4;
    unsigned special_u = payload_u[0] + payload_u[1] + eot_u;
-
-   /* If the minimum vector length can't fit in any single existing block, we
-    * will need a new block for it. This is quite conservative.
-    */
-   unsigned min_ugprs = special_u * ugpr_per_grf;
-   if (instr_req.ugpr > payload_u[0] * ugpr_per_grf &&
-       instr_req.ugpr > payload_u[1] * ugpr_per_grf &&
-       instr_req.ugpr > eot_u * ugpr_per_grf) {
-
-      min_ugprs += instr_req.ugpr;
-   }
 
    unsigned increment[JAY_NUM_STRIDES] = { grf_per_gpr, grf_per_gpr,
                                            2 * grf_per_gpr };
@@ -361,6 +373,15 @@ jay_partition_grf(jay_shader *shader)
    for (unsigned i = 0; i < JAY_NUM_STRIDES; ++i) {
       min_grf[i] = align(instr_req.gpr[i] * grf_per_gpr, increment[i]);
       min_grf_for_gprs += min_grf[i];
+   }
+
+   /* If the minimum vector length can't fit in any single existing block, we
+    * will need a new block for it. This is quite conservative.
+    */
+   unsigned min_ugprs = special_u * ugpr_per_grf;
+   unsigned max_ugpr_block = MAX3(payload_u[0], payload_u[1], eot_u);
+   if (instr_req.ugpr > max_ugpr_block * ugpr_per_grf) {
+      min_ugprs += instr_req.ugpr;
    }
 
    unsigned estimate_nonunif_grf =
@@ -378,10 +399,12 @@ jay_partition_grf(jay_shader *shader)
        * and if that fails, build one with it.
        */
       spilling_grfs = spilling ? shader->dispatch_width / ugpr_per_grf : 0;
-      uniform_grfs = DIV_ROUND_UP(demand[UGPR], ugpr_per_grf) + spilling_grfs;
+      uniform_grfs = DIV_ROUND_UP(MAX2(demand[UGPR], min_ugprs), ugpr_per_grf) +
+                     spilling_grfs;
 
       hw_grfs =
          intel_vrt_register_file_size(shader->devinfo,
+                                      shader->prog_data->base.source_hash,
                                       uniform_grfs + estimate_nonunif_grf);
 
       /* We want to determine a good GPR/UGPR split by the demand calculation.
@@ -394,11 +417,11 @@ jay_partition_grf(jay_shader *shader)
       }
 
       /* Finally, we need to snap to GPR bounds */
-      uniform_grfs =
-         CLAMP(uniform_grfs,
-               DIV_ROUND_UP(min_ugprs, ugpr_per_grf) + spilling_grfs,
-               hw_grfs - min_grf_for_gprs);
+      assert(hw_grfs >= min_grf_for_gprs);
+      uniform_grfs = MIN2(uniform_grfs, hw_grfs - min_grf_for_gprs);
       uniform_grfs = align(uniform_grfs, grf_per_gpr);
+
+      assert(uniform_grfs <= hw_grfs);
       nonuniform_grfs = hw_grfs - uniform_grfs;
 
       /* Set the targets for the virtual register file accordingly */
@@ -435,7 +458,16 @@ jay_partition_grf(jay_shader *shader)
       }
    }
 
-   min_grf[JAY_STRIDE_4] = MAX2(min_grf[JAY_STRIDE_4], special_4);
+   /* As above, but for non-split stride-4 GPRs this time: if the minimum vector
+    * length can't fit in any single existing block, we will need a new block
+    * for it.
+    */
+   unsigned req_grf4 = instr_req.gpr[JAY_STRIDE_4] * grf_per_gpr;
+   min_grf[JAY_STRIDE_4] = special_4;
+
+   if (req_grf4 > MAX3(payload_4[0], payload_4[1], eot_4)) {
+      min_grf[JAY_STRIDE_4] += req_grf4;
+   }
 
    unsigned picked_grf[JAY_NUM_STRIDES] = {}, total = 0;
 
@@ -478,6 +510,7 @@ jay_partition_grf(jay_shader *shader)
       { GPR, JAY_STRIDE_4, picked_grf[JAY_STRIDE_4] - special_4 },
       { GPR, JAY_STRIDE_8, picked_grf[JAY_STRIDE_8] },
       { GPR, JAY_STRIDE_2, picked_grf[JAY_STRIDE_2] },
+      { GPR, JAY_STRIDE_4, split_4, JAY_BLOCK_NORMAL, 1 },
 
       /* Spilling registers */
       { UGPR, 0, spilling_grfs, JAY_BLOCK_SPILL },
@@ -493,6 +526,7 @@ jay_partition_grf(jay_shader *shader)
    };
 
    shader->num_regs[FLAG] = hw_flags;
+   shader->num_regs[J_ADDRESS] = 1;
 
    build_partition(shader, hw_grfs, blocks, ARRAY_SIZE(blocks));
 
@@ -532,13 +566,15 @@ static const char *jay_files[JAY_NUM_RA_FILES] = {
 };
 
 void
-jay_print_partition(struct jay_partition *p)
+jay_print_partition(jay_shader *s)
 {
+   struct jay_partition *p = &s->partition;
+
    jay_foreach_ra_file(file) {
       if (p->nr_blocks[file]) {
          printf("%s" ANSI_BOLD "    GRF      %s%s" ANSI_END "\n",
                 file ? "\n" : "", jay_files[file],
-                file == GPR ? "    Stride" : "");
+                file == GPR ? "    Stride   Split" : "");
       }
 
       for (unsigned b = 0; b < p->nr_blocks[file]; ++b) {
@@ -549,7 +585,8 @@ jay_print_partition(struct jay_partition *p)
                 B.start_gpr, B.start_gpr + B.len_gpr - 1);
 
          if (file == GPR) {
-            printf("  %u-bit", jay_stride_to_bits(B.stride));
+            printf("  %u-bit   SIMD%u", jay_stride_to_bits(B.stride),
+                   s->dispatch_width >> B.split);
          }
 
          const char *types[JAY_BLOCK_TYPES] = { "", " EOT", " Spill",

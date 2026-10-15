@@ -286,7 +286,8 @@ _mesa_resize_framebuffer(struct gl_context *ctx, struct gl_framebuffer *fb,
          struct gl_renderbuffer *rb = att->Renderbuffer;
          /* only resize if size is changing */
          if (rb->Width != width || rb->Height != height) {
-            if (rb->AllocStorage(ctx, rb, rb->InternalFormat, width, height)) {
+            if (_mesa_renderbuffer_alloc_storage(ctx, rb, rb->InternalFormat,
+                                                 width, height)) {
                assert(rb->Width == width);
                assert(rb->Height == height);
             }

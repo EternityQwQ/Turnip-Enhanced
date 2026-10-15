@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "jay.h"
 #include "jay_ir.h"
 #include "nir.h"
 
@@ -37,18 +38,12 @@ void jay_populate_prog_data(const struct intel_device_info *devinfo,
                             union brw_any_prog_key *key,
                             struct jay_fs_perprim_data *fs_perprim);
 void jay_process_nir(const struct intel_device_info *devinfo,
-                     nir_shader *nir,
-                     union brw_any_prog_data *prog_data,
-                     union brw_any_prog_key *key,
-                     debug_archiver *archiver,
+                     const struct jay_compile_params *params,
                      struct jay_fs_perprim_data *fs_perprim);
 unsigned jay_select_simd(const struct intel_device_info *, nir_shader *nir);
 void jay_process_nir_for_simd(const struct intel_device_info *devinfo,
-                              nir_shader *nir,
+                              const struct jay_compile_params *params,
                               unsigned simd_width,
-                              union brw_any_prog_data *prog_data,
-                              union brw_any_prog_key *key,
-                              debug_archiver *archiver,
                               bool *track_helpers);
 
 void jay_compute_liveness(jay_function *f);
@@ -57,7 +52,7 @@ void jay_calculate_register_demands(jay_function *f);
 
 void jay_spill(jay_function *func, enum jay_file file, unsigned limit);
 void jay_partition_grf(jay_shader *shader);
-void jay_print_partition(struct jay_partition *p);
+void jay_print_partition(jay_shader *s);
 void jay_register_allocate(jay_shader *s);
 void jay_assign_flags(jay_shader *s);
 void jay_assign_accumulators(jay_shader *s);
@@ -147,6 +142,8 @@ jay_is_early_eot_send(jay_shader *s, const jay_inst *I)
 {
    return I->op == JAY_OPCODE_SEND && jay_send_eot(I) && jay_has_early_eot(s);
 }
+
+void jay_opt_sampler_vectorize(jay_shader *s);
 
 #ifdef __cplusplus
 } /* extern C */

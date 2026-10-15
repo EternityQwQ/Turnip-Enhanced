@@ -31,7 +31,10 @@ propagate_cmod(jay_function *func, jay_inst *I, jay_inst **defs)
 
    /* Pattern match `cmp ssa, 0` or `cmp 0, ssa`. */
    jay_foreach_ssa_src(I, s) {
-      if (jay_is_zero(I->src[1 - s]) && jay_num_values(I->src[s]) == 1) {
+      if (jay_is_zero(I->src[1 - s]) &&
+          jay_num_values(I->src[s]) == 1 &&
+          !I->src[s].negate &&
+          !I->src[s].abs) {
          def = defs[jay_base_index(I->src[s])];
 
          /* Canonicalize the cmod to have the zero second */
@@ -367,6 +370,7 @@ propagate_backwards(jay_function *f)
           use->op == JAY_OPCODE_MOV &&
           use->dst.file != J_ADDRESS &&
           jay_num_values(use->dst) == jay_num_values(use->src[0]) &&
+          !(I->op == JAY_OPCODE_SEND && I->dst.file != use->dst.file) &&
           (!jay_is_flag(use->dst) || jay_num_isa_srcs(I) < 3)) {
 
          *(flag ? &I->cond_flag : &I->dst) = use->dst;

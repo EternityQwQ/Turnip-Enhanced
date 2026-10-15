@@ -312,9 +312,9 @@ anv_cmd_buffer_push_driver_values(struct anv_cmd_buffer *cmd_buffer,
          uint64_t addr64 = anv_address_physical(indirect_group);
          uint32_t lower_addr32 = addr64 & 0xffffffff;
          uint32_t upper_addr32 = addr64 >> 32;
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], UINT32_MAX);
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], lower_addr32);
-         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], upper_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[0], lower_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[1], upper_addr32);
+         UPDATE_PUSH(push->drv_data.cs.num_workgroups[2], UINT32_MAX);
       }
    }
 
@@ -585,9 +585,9 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       .push_addr64 = push_addr64,
       .base_wg = {0, 0, 0},
       .num_wg = {
-         UINT32_MAX,
          indirect_addr64 & 0xffffffff,
          indirect_addr64 >> 32,
+         UINT32_MAX,
       },
       .unaligned_x_offset = 0,
    };
@@ -681,9 +681,9 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
    };
    if (!anv_address_is_null(indirect_addr)) {
       uint64_t indirect_addr64 = anv_address_physical(indirect_addr);
-      inline_value.num_wg[0] = UINT32_MAX;
-      inline_value.num_wg[1] = indirect_addr64 & 0xffffffff;
-      inline_value.num_wg[2] = indirect_addr64 >> 32;
+      inline_value.num_wg[0] = indirect_addr64 & 0xffffffff;
+      inline_value.num_wg[1] = indirect_addr64 >> 32;
+      inline_value.num_wg[2] = UINT32_MAX;
    } else {
       inline_value.num_wg[0] = num_wg[0];
       inline_value.num_wg[1] = num_wg[1];
@@ -1057,30 +1057,23 @@ genX(cmd_buffer_ray_query_globals)(struct anv_cmd_buffer *cmd_buffer)
 
 #if GFX_VERx10 >= 125
 static void
-calc_local_trace_size(uint8_t local_shift[3], const uint32_t global[3],
-                      uint32_t max_shift)
+calc_local_trace_size(uint8_t local_shift[3], uint32_t global_y,
+                      uint32_t max_tile_size, uint32_t tile_x,
+                      uint32_t tile_y)
 {
-   unsigned total_shift = 0;
-   memset(local_shift, 0, 3);
+   tile_x = tile_x != 0 ? tile_x : (global_y == 1 ? 256 : 8);
+   tile_y = global_y == 1 ? 1 : (tile_y != 0 ? tile_y : 64);
 
-   bool progress;
-   do {
-      progress = false;
-      for (unsigned i = 0; i < 3; i++) {
-         assert(global[i] > 0);
-         if ((1 << local_shift[i]) < global[i]) {
-            progress = true;
-            local_shift[i]++;
-            total_shift++;
-         }
+   while (tile_x * tile_y > max_tile_size) {
+      if (tile_y > 1)
+         tile_y >>= 1;
+      else
+         tile_x >>= 1;
+   }
 
-         if (total_shift == max_shift)
-            return;
-      }
-   } while(progress);
-
-   /* Assign whatever's left to x */
-   local_shift[0] += max_shift - total_shift;
+   local_shift[0] = util_logbase2(tile_x);
+   local_shift[1] = util_logbase2(tile_y);
+   local_shift[2] = 0;
 }
 
 static struct GENX(RT_SHADER_TABLE)
@@ -1540,8 +1533,10 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
       anv_cmd_buffer_temporary_state_address(cmd_buffer, rtdg_state);
    const struct brw_cs_prog_data *cs_prog_data =
       brw_cs_prog_data_const(device->rt_trampoline->prog_data);
-   struct intel_cs_dispatch_info dispatch =
+   const struct intel_cs_dispatch_info dispatch =
       brw_cs_get_dispatch_info(device->info, cs_prog_data, NULL);
+   const uint32_t max_tile_size =
+      device->info->max_cs_workgroup_threads * dispatch.simd_size;
 
    uint8_t local_size_log2[3];
    uint32_t global_size[3] = {};
@@ -1550,9 +1545,9 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
        * will use a two-dimensional dispatch size.  Worst case, our initial
        * dispatch will be a little slower than it has to be.
        */
-      local_size_log2[0] = util_logbase2(dispatch.simd_size) - 1;
-      local_size_log2[1] = 1;
-      local_size_log2[2] = 0;
+      calc_local_trace_size(local_size_log2, 64, max_tile_size,
+                            device->physical->drirc.perf.rt_tile_x,
+                            device->physical->drirc.perf.rt_tile_y);
 
       struct mi_builder b;
       mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);
@@ -1600,8 +1595,10 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
       mi_store(&b, mi_reg32(GENX(GPGPU_DISPATCHDIMZ_num)), launch_size[2]);
 
    } else {
-      calc_local_trace_size(local_size_log2, params->launch_size,
-                            util_logbase2(dispatch.simd_size));
+      calc_local_trace_size(local_size_log2, params->launch_size[1],
+                            max_tile_size,
+                            device->physical->drirc.perf.rt_tile_x,
+                            device->physical->drirc.perf.rt_tile_y);
 
       for (unsigned i = 0; i < 3; i++) {
          /* We have to be a bit careful here because DIV_ROUND_UP adds to the
@@ -1628,6 +1625,14 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
       },
    };
 
+   const uint32_t tile_size =
+      1 << (local_size_log2[0] + local_size_log2[1] +
+            local_size_log2[2]);
+   const uint32_t threads_per_group =
+      DIV_ROUND_UP(tile_size, dispatch.simd_size);
+
+   assert(threads_per_group <= device->info->max_cs_workgroup_threads);
+
    compute_update_async_threads_limit(cmd_buffer, cs_prog_data, &dispatch);
 
    if (GFX_VERx10 >= 350 && device->physical->uses_efficient_64bit) {
@@ -1653,7 +1658,7 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
          .Post_sync_opn3.MOCS            = anv_mocs(device, NULL, 0),
          .InterfaceDescriptor            = (struct GENX(INTERFACE_DESCRIPTOR_DATA_2)) {
             .KernelStartPointer                =
-               anv_shader_internal_get_pointer(device, device->rt_trampoline),
+               anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
             .RegistersPerThread                = intel_register_blocks(device->info, cs_prog_data->base.grf_used),
             .NumberofThreadsinGPGPUThreadGroup = dispatch.threads,
             .ThreadGroupDispatchSize           = intel_compute_threads_group_dispatch_size_walker_2(dispatch.threads),
@@ -1697,10 +1702,10 @@ cmd_buffer_trace_rays(struct anv_cmd_buffer *cmd_buffer,
 #endif
 
          .InterfaceDescriptor = (struct GENX(INTERFACE_DESCRIPTOR_DATA)) {
-            .KernelStartPointer = anv_shader_internal_get_pointer(device, device->rt_trampoline),
-            .NumberofThreadsinGPGPUThreadGroup = 1,
+            .KernelStartPointer = anv_shader_get_pointer(device, &device->rt_trampoline->kernel),
+            .NumberofThreadsinGPGPUThreadGroup = threads_per_group,
             .ThreadGroupDispatchSize =
-            intel_compute_threads_group_dispatch_size(dispatch.threads),
+               intel_compute_threads_group_dispatch_size(threads_per_group),
             .BTDMode = true,
 #if INTEL_NEEDS_WA_14017794102 || INTEL_NEEDS_WA_14023061436
             .ThreadPreemption = false,

@@ -178,7 +178,7 @@ foreach f : gen_xml_files + gen_xml_rt_files
     _name,
     input : ['gen_pack_header.py', f],
     output : _name,
-    command : [prog_python, '@INPUT@', '--engines=render,blitter,compute'],
+    command : [prog_python, '@INPUT@', '--engines=render,blitter,compute', '--pack'],
     capture : true,
     depend_files: gen_pack_header_deps
   )
@@ -191,13 +191,13 @@ foreach f : gen_xml_files
     _name,
     input : ['gen_pack_header.py', f],
     output : _name,
-    command : [prog_python, '@INPUT@', '--engines=video'],
+    command : [prog_python, '@INPUT@', '--engines=video', '--pack'],
     capture : true,
     depend_files: gen_pack_header_deps
   )
 endforeach
 
-genX_cl_included_symbols = [
+genX_cl_pack_symbols = [
   # instructions
   '3DMESH_3D',
   '3DSTATE_CLIP',
@@ -242,6 +242,7 @@ genX_cl_included_symbols = [
   'COMPUTE_WALKER_BODY',
   'INTERFACE_DESCRIPTOR_DATA',
   'POSTSYNC_DATA',
+  'RENDER_SURFACE_STATE',
   'RT_DISPATCH_GLOBALS',
   'RT_SHADER_TABLE',
   'VERTEX_BUFFER_STATE',
@@ -255,8 +256,8 @@ foreach f : gen_xml_files + gen_xml_rt_files
     input : ['gen_pack_header.py', f],
     output : _name,
     command : [prog_python, '@INPUT@', '--engines=render,blitter,compute',
-               '--opencl', '--repack',
-               '--include-symbols', ','.join(genX_cl_included_symbols)],
+               '--opencl', '--pack', '--repack', '--unpack',
+               '--include-symbols', ','.join(genX_cl_pack_symbols)],
     capture : true,
     depend_files: gen_pack_header_deps
   )

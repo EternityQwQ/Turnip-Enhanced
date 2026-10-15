@@ -215,6 +215,12 @@ struct kk_ts_resolve {
    uint64_t dst_addr;
 };
 
+struct kk_ts_stage_entry {
+   mtl_counter_heap *heap;
+   enum mtl_render_stages stage;
+   uint32_t index;
+};
+
 struct kk_cmd_buffer {
    struct vk_command_buffer vk;
 
@@ -226,6 +232,9 @@ struct kk_cmd_buffer {
    } metal;
    /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
    struct util_dynarray ts_resolves;
+   /* Timestamps already sampled by the current render encoder. (struct
+    * kk_ts_stage_entry). */
+   struct util_dynarray ts_stage_map;
    /* Deferred writes due to being mid render encoder */
    struct util_dynarray post_render_writes;
 

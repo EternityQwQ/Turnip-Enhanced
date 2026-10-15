@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "compiler/brw/brw_eu_defines.h"
 #include "util/hash_table.h"
 #include "util/lut.h"
 #include "util/macros.h"
@@ -238,6 +239,24 @@ lower_repeated_phi_srcs(jay_function *f,
    u_sparse_bitset_clear_all(seen);
 }
 
+static void
+lower_ex_desc_address_registers(jay_inst *I, jay_function *f)
+{
+   if (I->op != JAY_OPCODE_SEND)
+      return;
+   if (jay_is_null(I->src[1]) || jay_is_imm(I->src[1]))
+      return;
+   /* ex_desc should have been in a UGPR so we could have more easily performed
+    * optimizations with it. It doesn't need to be an address register yet since
+    * we're moving it to one here.
+    */
+   assert(I->src[1].file == UGPR);
+   jay_builder b = jay_init_builder(f, jay_before_inst(I));
+   jay_def tmp = jay_alloc_def(&b, J_ADDRESS, 1);
+   jay_MOV(&b, tmp, I->src[1]);
+   jay_replace_src(&I->src[1], tmp);
+}
+
 void
 jay_lower_pre_ra(jay_shader *s)
 {
@@ -260,6 +279,8 @@ jay_lower_pre_ra(jay_shader *s)
          }
 
          jay_foreach_inst_in_block(block, I) {
+            lower_ex_desc_address_registers(I, f);
+
             jay_builder b = { .shader = s, .func = f };
 
             lower_bf16_restrictions(I, f);
@@ -277,16 +298,6 @@ jay_lower_pre_ra(jay_shader *s)
                                           I->src[I->num_srcs - 2]));
                jay_replace_src(&I->src[I->num_srcs - 1], copy);
                jay_replace_src(&I->src[I->num_srcs - 2], copy);
-            }
-
-            /* Shuffle(UGPR) can result from copyprop if there's a mismatch
-             * between isel and divergence analysis (e.g. because multipolygon
-             * is disabled). Legalize.
-             */
-            if (I->op == JAY_OPCODE_SHUFFLE && I->src[0].file == UGPR) {
-               assert(!I->predication);
-               I->op = JAY_OPCODE_MOV;
-               jay_shrink_sources(I, 1);
             }
 
             /* lower_immediates must be last since it consumes I */
