@@ -45,6 +45,7 @@ struct si_query_pc {
 static void si_pc_wait_idle(struct si_context *sctx)
 {
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
+   enum ac_rgp_flush_bits flush_bits = 0;
    uint32_t coher_cntl_stall_all = 0;
 
    if (sctx->gfx_level != GFX9)
@@ -63,7 +64,9 @@ static void si_pc_wait_idle(struct si_context *sctx)
    radeon_emit(EVENT_TYPE(V_028A90_CS_PARTIAL_FLUSH | EVENT_INDEX(4)));
    radeon_end();
 
-   si_cp_acquire_mem(sctx, cs, coher_cntl_stall_all, V_581A_PREFETCH_PARSER);
+   ac_emit_cp_acquire_mem(&cs->current, sctx->gfx_level, AMD_IP_GFX,
+                          V_581A_PREFETCH_PARSER, coher_cntl_stall_all,
+                          &sctx->context_roll, &flush_bits);
 }
 
 static void si_pc_emit_instance(struct si_context *sctx, int se, int instance)

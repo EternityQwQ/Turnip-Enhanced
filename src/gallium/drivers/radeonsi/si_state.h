@@ -332,6 +332,12 @@ enum
    BITFIELD_RANGE(SI_DESCS_FIRST_SHADER + MESA_SHADER_##name * SI_NUM_SHADER_DESCS,             \
                      SI_NUM_SHADER_DESCS)
 
+static inline bool si_descriptors_idx_is_compute(unsigned idx)
+{
+   return idx >= SI_DESCS_FIRST_COMPUTE &&
+          idx < SI_DESCS_FIRST_COMPUTE + SI_NUM_SHADER_DESCS;
+}
+
 static inline unsigned si_const_and_shader_buffer_descriptors_idx(unsigned shader)
 {
    return SI_DESCS_FIRST_SHADER + shader * SI_NUM_SHADER_DESCS +
@@ -477,7 +483,6 @@ bool si_is_format_supported(struct pipe_screen *screen, enum pipe_format format,
 void si_emit_dpbb_state(struct si_context *sctx, unsigned index);
 
 /* si_state_shaders.cpp */
-bool si_shader_mem_ordered(struct si_shader *shader);
 void si_init_shader_functions(struct si_context *sctx);
 void si_schedule_initial_compile(struct si_context *sctx, mesa_shader_stage stage,
                                  struct util_queue_fence *ready_fence,

@@ -653,6 +653,7 @@ static void si_init_gfx_caps(struct si_screen *sscreen)
    caps->cl_gl_sharing = true;
    caps->call_finalize_nir_in_linker = true;
    caps->blit_3d = true;
+   caps->polygon_stipple = true;
    caps->glsl_bindless_handles_are_32bit = true;
    caps->fbfetch = 1;
 
@@ -842,7 +843,9 @@ bool si_init_gfx_screen(struct si_screen *sscreen) {
    support_llvm = strlen(ac_get_llvm_processor_name(sscreen->info.family)) != 0;
 #endif
 
-   sscreen->has_gfx_compute = support_aco || support_llvm;
+   sscreen->has_gfx_compute = (support_aco || support_llvm) &&
+                              (sscreen->info.ip[AMD_IP_GFX].num_queues > 0 ||
+                               sscreen->info.ip[AMD_IP_COMPUTE].num_queues > 0);
 
    if (!sscreen->has_gfx_compute)
       return true;

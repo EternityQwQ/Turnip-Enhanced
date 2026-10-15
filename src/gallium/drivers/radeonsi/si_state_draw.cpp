@@ -11,6 +11,7 @@
 #define XXH_INLINE_ALL
 #include "util/xxhash.h"
 #include "util/u_cpu_detect.h"
+#include "util/u_draw.h"
 #include "util/u_index_modify.h"
 #include "util/u_upload_mgr.h"
 #include "ac_rtld.h"
@@ -815,8 +816,12 @@ static unsigned si_get_init_multi_vgt_param(struct si_screen *sscreen, union si_
    bool partial_es_wave = false;
 
    if (key->u.uses_tess) {
-      /* SWITCH_ON_EOI must be set if PrimID is used. */
-      if (key->u.tess_uses_prim_id)
+      /* SWITCH_ON_EOI must be set if PrimID is used.
+       * On GFX6 single-SE chips (Cape Verde, max_se == 1), SWITCH_ON_EOI doesn't
+       * work in hardware, so it's unnecessary and causes wave splitting (partial_es_wave).
+       * Those chips instead limit TCS workgroup to 1 patch via has_primid_instancing_bug.
+       */
+      if (key->u.tess_uses_prim_id && !sscreen->info.compiler_info.has_primid_instancing_bug)
          ia_switch_on_eoi = true;
 
       /* Bug with tessellation and GS on Bonaire and older 2 SE chips. */
@@ -1043,7 +1048,7 @@ static unsigned si_get_ia_multi_vgt_param(struct si_context *sctx,
                                                               instance_count, 2, sctx->patch_vertices)) {
          /* The cache flushes should have been emitted already. */
          assert(sctx->barrier_flags == 0);
-         sctx->barrier_flags = SI_BARRIER_EVENT_VGT_FLUSH;
+         sctx->barrier_flags = AC_BARRIER_VGT_FLUSH;
          si_emit_barrier_direct(sctx, 0);
       }
    }
@@ -2340,7 +2345,7 @@ static void si_draw(struct pipe_context *ctx,
          index_size = 2;
 
          /* GFX6-7 don't read index buffers through L2. */
-         si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+         si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
          si_resource(indexbuf)->L2_cache_dirty = false;
       } else if (!IS_DRAW_VERTEX_STATE && info->has_user_indices) {
          struct pipe_resource *release_buf = NULL;
@@ -2368,7 +2373,7 @@ static void si_draw(struct pipe_context *ctx,
                  si_resource(indexbuf)->L2_cache_dirty) {
          /* GFX8-GFX11.5 reads index buffers through L2, so it doesn't
           * need this. */
-         si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+         si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
          si_resource(indexbuf)->L2_cache_dirty = false;
       }
    }
@@ -2382,13 +2387,13 @@ static void si_draw(struct pipe_context *ctx,
       /* Indirect buffers use L2 on GFX9-GFX11.5, but not other hw. */
       if (GFX_VERSION <= GFX8 || GFX_VERSION == GFX12) {
          if (indirect->buffer && si_resource(indirect->buffer)->L2_cache_dirty) {
-            si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+            si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
             si_resource(indirect->buffer)->L2_cache_dirty = false;
          }
 
          if (indirect->indirect_draw_count &&
              si_resource(indirect->indirect_draw_count)->L2_cache_dirty) {
-            si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
+            si_set_barrier_flags(sctx, AC_BARRIER_WB_L2 | AC_BARRIER_PFP_SYNC_ME);
             si_resource(indirect->indirect_draw_count)->L2_cache_dirty = false;
          }
       }
@@ -2600,9 +2605,7 @@ static void si_draw(struct pipe_context *ctx,
 
    /* Workaround for a VGT hang when streamout is enabled.
     * It must be done after drawing. */
-   if (((GFX_VERSION == GFX7 && sctx->family == CHIP_HAWAII) ||
-        (GFX_VERSION == GFX8 && (sctx->family == CHIP_TONGA || sctx->family == CHIP_FIJI))) &&
-       si_get_streamout_enable_state(sctx)) {
+   if (sctx->screen->info.has_streamout_vgt_hang_bug && si_get_streamout_enable_state(sctx)) {
       radeon_begin(&sctx->gfx_cs);
       radeon_event_write(V_028A90_VGT_STREAMOUT_SYNC);
       radeon_end();
@@ -2810,6 +2813,7 @@ void GFX(si_init_draw_functions_)(struct si_context *sctx)
    sctx->b.draw_vbo = si_invalid_draw_vbo;
    sctx->b.draw_vertex_state = si_invalid_draw_vertex_state;
    sctx->blitter->draw_rectangle = si_draw_rectangle;
+   sctx->b.draw_vbo_buffers = util_draw_vbo_buffers;
 
    si_init_ia_multi_vgt_param_table(sctx);
 }

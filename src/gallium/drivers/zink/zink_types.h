@@ -37,6 +37,7 @@
 #include "pipe/p_state.h"
 
 #include "pipebuffer/pb_cache.h"
+#include "util/cnd_monotonic.h"
 #include "util/pb_slab.h"
 
 #include "util/blob.h"
@@ -280,7 +281,11 @@ struct tc_unflushed_batch_token;
 /* an async fence created for tc */
 struct zink_tc_fence {
    struct pipe_reference reference;
-   /* enables distinction between tc fence submission and vk queue submission */
+   /* the batch state's usage.submit_count from before the submit of the batch this fence belongs to:
+    * - diff == 0: the batch has not been submitted yet (or the submit failed if fence->submitted)
+    * - diff == 1: the batch has been submitted (or a failed submit was reset if !fence->submitted)
+    * - diff > 1: the batch state has been reset
+    */
    uint32_t submit_count;
    /* when the tc fence is signaled for use */
    struct util_queue_fence ready;
@@ -305,7 +310,7 @@ struct zink_fence {
 /** state types */
 
 struct zink_vertex_elements_hw_state {
-   uint32_t hash;
+   uint32_t id;
    uint32_t num_bindings, num_attribs;
    /* VK_EXT_vertex_input_dynamic_state uses different types */
    union {
@@ -368,7 +373,7 @@ struct zink_rasterizer_state {
 };
 
 struct zink_blend_state {
-   uint32_t hash;
+   uint32_t id;
    unsigned num_rts;
    VkPipelineColorBlendAttachmentState attachments[PIPE_MAX_COLOR_BUFS];
 
@@ -591,10 +596,13 @@ struct zink_batch_usage {
     /* this is a monotonic int used to disambiguate internal fences from their tc fence references AND
      * to disambiguate zink_bo usage when batches are reused
      *
-     * it increments on batch submit and batch reset, meaning that a diff<=1 means matching usage
+     * it increments once when the batch is successfully submitted and once when a submitted batch state
+     * is reset, meaning that a diff<=1 means matching usage
+     *
+     * it is written under mtx, and the submit increment happens together with setting fence.submitted
      */
    uint32_t submit_count;
-   cnd_t flush;
+   struct u_cnd_monotonic flush;
    mtx_t mtx;
    bool unflushed;
 };
@@ -644,7 +652,7 @@ struct zink_batch_state {
    struct util_queue_fence flush_completed;
 
    struct set programs;
-   struct set dmabuf_exports;
+   struct hash_table dmabuf_exports;
 
 #define BUFFER_HASHLIST_SIZE 32768
    /* buffer_indices_hashlist[hash(bo)] returns -1 if the bo
@@ -723,6 +731,13 @@ struct zink_bo {
           * it can only transition from false to true. Protected by lock.
           */
          bool is_shared;
+
+         struct zink_clientptr_heap *clientptr_heap;
+
+         /* entry for zink_clientptr_heap->bos */
+         struct list_head clientptr_heap_link;
+
+         struct zink_clientptr_range *clientptr_range;
       } real;
       struct {
          struct pb_slab_entry entry;
@@ -757,6 +772,49 @@ static inline struct zink_bo *
 zink_bo(struct pb_buffer_lean *pbuf)
 {
    return (struct zink_bo*)pbuf;
+}
+
+struct zink_clientptr_range {
+   struct pipe_clientptr_range b;
+   struct list_head free_ranges_link;
+};
+
+static inline struct zink_clientptr_range *
+zink_clientptr_range(struct pipe_clientptr_range *pclientptr_range)
+{
+   return (struct zink_clientptr_range*)pclientptr_range;
+}
+
+struct zink_clientptr_heap {
+   struct tc_clientptr_heap b;
+
+   struct zink_screen *screen;
+
+   /* client mapped buffers with the same heap can share slabs */
+   struct pb_slabs slabs;
+
+   /* real zink_bos mapped to client pointers in this heap */
+   struct list_head bos;
+   simple_mtx_t bos_lock;
+
+   /* former clientptr-backed cpu_storage ranges to be freed through clientptr_reclaim */
+   struct list_head free_ranges;
+   simple_mtx_t free_ranges_lock;
+
+   /* Held during the lifetime of direct bo mappings
+    * of any bo in bos used for the purpose of a simple
+    * download/upload, such as subdata.
+    *
+    * write-lock this to enable remapping a bo, otherwise
+    * the underlying memory object could already be mapped.
+    */
+   struct u_rwlock short_lived_lock;
+};
+
+static inline struct zink_clientptr_heap *
+zink_clientptr_heap(struct pipe_clientptr_heap *clientptr_heap)
+{
+   return (struct zink_clientptr_heap*)clientptr_heap;
 }
 
 /** clear types */
@@ -1206,20 +1264,22 @@ struct zink_resource_object {
     * in the ordered cmdbuf which can promote barriers to unordered
     */
    bool ordered_access_is_copied;
+   bool has_ordered_access;
    bool unordered_read;
    bool unordered_write;
    bool unsync_access;
    bool copies_valid;
    bool copies_need_reset; //for use with batch state resets
 
-   struct u_rwlock copy_lock;
-   struct util_dynarray copies[16]; //regions being copied to; for barrier omission
-
    union {
       VkBuffer buffer;
       VkImage image;
    };
    VkDeviceAddress bda;
+   struct zink_bo *bo;
+
+   struct u_rwlock copy_lock;
+   struct util_dynarray copies[16]; //regions being copied to; for barrier omission
 
    struct set surface_cache;
    simple_mtx_t surface_mtx;
@@ -1236,7 +1296,6 @@ struct zink_resource_object {
 
    /* TODO: this should be a union */
    int handle;
-   struct zink_bo *bo;
    // struct {
    struct kopper_displaytarget *dt;
    uint32_t dt_idx;
@@ -1262,6 +1321,8 @@ struct zink_resource_object {
    bool coherent;
    bool is_aux;
    bool immutable_handle;
+
+   struct pipe_clientptr_heap *clientptr_heap;
 };
 
 /* "gfx" includes mesh here */
@@ -1269,18 +1330,27 @@ struct zink_resource {
    struct threaded_resource base;
 
    enum pipe_format internal_format:16;
-
+   bool is_sparse;
+   uint32_t size;
    struct zink_resource_object *obj;
    struct zink_resource *transient; //for msrtt without EXT_multisampled_render_to_single_sampled and format view shadowing
+
+   alignas(64) VkPipelineStageFlagBits gfx_barrier;
+   union {
+      uint16_t bind_count[2]; //gfx, compute
+      uint32_t all_binds;
+   };
+   VkAccessFlagBits barrier_access[2]; //gfx, compute
+   uint32_t vbo_bind_mask;
+   uint8_t vbo_bind_count;
    uint32_t queue;
+
    union {
       struct {
          struct util_range valid_buffer_range;
          struct util_range *real_buffer_range; //only set on tc replace_buffer src
-         uint32_t vbo_bind_mask : PIPE_MAX_ATTRIBS;
          uint8_t ubo_bind_count[2];
          uint8_t ssbo_bind_count[2];
-         uint8_t vbo_bind_count;
          uint8_t so_bind_count; //not counted in all_binds
          bool so_valid;
          uint32_t ubo_bind_mask[MESA_SHADER_MESH_STAGES];
@@ -1308,14 +1378,6 @@ struct zink_resource {
       uint16_t bindless[2]; //tex, img
       uint32_t all_bindless;
    };
-   union {
-      uint16_t bind_count[2]; //gfx, compute
-      uint32_t all_binds;
-   };
-
-   VkPipelineStageFlagBits gfx_barrier;
-   VkAccessFlagBits barrier_access[2]; //gfx, compute
-
    unsigned rebind_count;
 
    VkRect2D damage;
@@ -1350,6 +1412,10 @@ struct zink_transfer {
    unsigned offset;
    unsigned depthPitch;
    bool unsync_upload;
+   uint8_t *clientptr;
+   unsigned clientptr_refcnt;
+   struct pipe_transfer *clientptr_upload;
+   bool short_lived;
 };
 
 
@@ -1392,6 +1458,7 @@ struct zink_screen {
    struct zink_batch_state *free_batch_states; //unused batch states
    struct zink_batch_state *last_free_batch_state; //for appending
    simple_mtx_t free_batch_states_lock;
+   simple_mtx_t submit_lock;
 
    struct zink_batch_state *active_batch_states; //active batch states
    struct zink_batch_state *last_active_batch_state; //for appending
@@ -1429,7 +1496,7 @@ struct zink_screen {
    struct set mesh_pipeline_libs[2];
    simple_mtx_t mesh_pipeline_libs_lock[2];
 
-   simple_mtx_t desc_set_layouts_lock;
+   simple_mtx_t ralloc_lock;
    struct hash_table desc_set_layouts[ZINK_DESCRIPTOR_BASE_TYPES];
    simple_mtx_t desc_pool_keys_lock;
    struct set desc_pool_keys[ZINK_DESCRIPTOR_BASE_TYPES];
@@ -1447,6 +1514,7 @@ struct zink_screen {
    uint8_t heap_map[ZINK_HEAP_MAX][VK_MAX_MEMORY_TYPES];  // mapping from zink heaps to memory type indices
    uint8_t heap_count[ZINK_HEAP_MAX];  // number of memory types per zink heap
    bool resizable_bar;
+   bool vis_vram_full;
 
    uint64_t total_video_mem;
    uint64_t clamp_video_mem;
@@ -1611,8 +1679,8 @@ struct zink_bufferview_key {
 };
 
 struct zink_buffer_view {
-   struct pipe_resource *pres;
    struct zink_bufferview_key key;
+   struct pipe_resource *pres;
    VkBufferView buffer_view;
 };
 
@@ -1739,6 +1807,7 @@ struct zink_context {
    unsigned flags;
 
    pipe_draw_func draw_vbo[2]; //batch changed
+   pipe_draw_buffers_func draw_vbo_buffers[2]; //batch changed
    pipe_draw_vertex_state_func draw_state[2]; //batch changed
    pipe_launch_grid_func launch_grid[2]; //batch changed
    pipe_draw_mesh_tasks_func draw_mesh_tasks[2]; //batch changed
@@ -1752,6 +1821,11 @@ struct zink_context {
    struct zink_batch_state *last_batch_state; //the last command buffer submitted
    struct zink_batch_state *batch_states; //list of submitted batch states: ordered by increasing timeline id
    unsigned batch_states_count; //number of states in `batch_states`
+   /* only ever incremented: the difference is the number of batches waiting for the flush thread,
+    * and it stays correct when the counters wrap
+    */
+   unsigned queued_batches; //batches given to submit_queue()
+   unsigned submitted_batches; //batches submit_queue() has finished: written by the flush thread
    struct zink_batch_state *free_batch_states; //unused batch states
    struct zink_batch_state *last_free_batch_state; //for appending
    bool oom_flush;
@@ -1845,6 +1919,7 @@ struct zink_context {
    struct pipe_vertex_buffer vertex_buffers[PIPE_MAX_ATTRIBS];
    unsigned vertex_buffers_count;
    bool vertex_buffers_dirty;
+   bool vertex_buffers_unowned;
 
    struct zink_sampler_state *sampler_states[MESA_SHADER_MESH_STAGES][PIPE_MAX_SAMPLERS];
    struct pipe_sampler_view *sampler_views[MESA_SHADER_MESH_STAGES][PIPE_MAX_SAMPLERS];
@@ -1985,6 +2060,9 @@ struct zink_context {
    uint32_t num_so_targets;
    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
    bool dirty_so_targets;
+
+   uint32_t blend_state_counter;
+   uint32_t vertex_element_state_counter;
 
    bool gfx_dirty;
    bool mesh_dirty;

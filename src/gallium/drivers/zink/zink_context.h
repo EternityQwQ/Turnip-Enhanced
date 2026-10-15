@@ -242,7 +242,9 @@ zink_bind_vertex_buffers_dynamic(struct zink_context *ctx, const struct pipe_ver
 void
 zink_bind_vertex_buffers(struct zink_context *ctx, const struct pipe_vertex_buffer *vbuffers);
 void
-zink_bind_vertex_addresses(struct zink_context *ctx);
+zink_bind_vertex_addresses(struct zink_context *ctx, const struct pipe_vertex_buffer *vbuffers);
+void
+zink_set_vertex_buffers_unowned(struct zink_context *ctx, unsigned num_buffers, const struct pipe_vertex_buffer *buffers);
 
 #ifdef __cplusplus
 }

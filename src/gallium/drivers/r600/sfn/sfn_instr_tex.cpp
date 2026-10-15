@@ -173,6 +173,9 @@ TexInstr::do_print(std::ostream& os) const
    os << (m_tex_flags.test(y_unnormalized) ? "U" : "N");
    os << (m_tex_flags.test(z_unnormalized) ? "U" : "N");
    os << (m_tex_flags.test(w_unnormalized) ? "U" : "N");
+
+   if (m_tex_flags.test(alt_const))
+      os << " AC";
 }
 
 const char *

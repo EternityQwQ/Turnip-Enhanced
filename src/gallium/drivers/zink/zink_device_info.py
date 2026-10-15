@@ -360,6 +360,10 @@ EXTENSIONS = [
     Extension("VK_KHR_shader_fma",
               alias="fma",
               features=True),
+    Extension("VK_KHR_map_memory2"),
+    Extension("VK_EXT_map_memory_placed",
+              alias="map_memory_placed",
+              features=True),
 ]
 
 # constructor: Versions(device_version(major, minor, patch), struct_version(major, minor))

@@ -22,6 +22,12 @@
 
 #define R600_GS_VERTEX_INDIRECT_TOTAL 6
 
+#define R600_SHADERIO_SLOT_POS_LOCATION 256
+#define R600_SHADERIO_FIXED_PT_LOCATION 257
+#define R600_SHADERIO_FACE_LOCATION     258
+#define R600_SHADERIO_BARY_SAMPLE       259
+#define R600_SHADERIO_BARY_AT           260
+
 struct nir_shader;
 struct nir_cf_node;
 struct nir_if;
@@ -172,6 +178,8 @@ public:
 
    void add_input(const ShaderInput& input) { m_inputs[input.location()] = input; }
 
+   inline unsigned input_count(const int location) { return m_inputs.count(location); }
+
    void set_input_gpr(int driver_lcation, int gpr);
 
    InputIterator find_input(int location) { return m_inputs.find(location); }
@@ -236,9 +244,13 @@ public:
 
    PRegister atomic_update();
    int remap_atomic_base(int base);
-   auto evaluate_resource_offset(nir_intrinsic_instr *instr, int src_id)
-      -> std::pair<int, PRegister>;
-   int ssbo_image_offset() const { return m_ssbo_image_offset; }
+   auto evaluate_resource_offset(nir_intrinsic_instr *instr,
+                                 int src_id) -> std::pair<int, PRegister>;
+   bool get_alt_const() const
+   {
+      return m_shader_stage == MESA_SHADER_FRAGMENT ||
+             m_shader_stage == MESA_SHADER_GEOMETRY;
+   }
    PRegister rat_return_address()
    {
       assert(m_rat_return_address);
@@ -247,7 +259,12 @@ public:
 
    PRegister emit_load_to_register(PVirtualValue src, int chan = -1);
 
-   virtual unsigned image_size_const_offset() { return 0;}
+   struct dynamic_offset get_dynamic_offset() const { return m_dynamic_offset; }
+   void clamp_dynamic_offset(const unsigned num_images)
+   {
+      if (num_images > m_dynamic_offset.ssbo_offset)
+         m_dynamic_offset.ssbo_offset = num_images;
+   }
 
    auto required_registers() const { return m_required_registers;}
 
@@ -275,7 +292,7 @@ protected:
 
    std::bitset<es_last> m_sv_values;
 
-   Shader(const char *type_id);
+   Shader(const char *type_id, struct dynamic_offset dynamic_offset = {0});
 
    const ShaderInput& input(int base) const;
 
@@ -366,12 +383,13 @@ private:
    PRegister m_atomic_update{nullptr};
    PRegister m_rat_return_address{nullptr};
 
-   int32_t m_ssbo_image_offset{0};
+   mesa_shader_stage m_shader_stage{(mesa_shader_stage)-1};
    uint32_t m_nloops{0};
    uint32_t m_required_registers{0};
 
    int64_t m_shader_id;
    static int64_t s_next_shader_id;
+   struct dynamic_offset m_dynamic_offset;
 
    class InstructionChain : public InstrVisitor {
    public:

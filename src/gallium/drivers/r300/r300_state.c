@@ -722,7 +722,11 @@ static void r300_set_blend_color(struct pipe_context* pipe,
             break;
 
 #if UTIL_ARCH_BIG_ENDIAN
+        /* R500 packs components into two registers, so BE swizzles differ. */
         case PIPE_FORMAT_A8R8G8B8_UNORM: {
+            if (r300->screen->caps.is_r500)
+                break;
+
             /* A8R8G8B8 constant-color blending consumes the register lanes
              * in a different order from pipe RGBA. Program the inverse
              * order so GL_CONSTANT_COLOR sees pipe RGBA.
@@ -750,6 +754,11 @@ static void r300_set_blend_color(struct pipe_context* pipe,
             float g = c.color[1];
             float b = c.color[2];
             float a = c.color[3];
+            if (r300->screen->caps.is_r500) {
+                c.color[0] = b;
+                c.color[2] = r;
+                break;
+            }
             c.color[0] = g;
             c.color[1] = b;
             c.color[2] = a;
@@ -757,8 +766,13 @@ static void r300_set_blend_color(struct pipe_context* pipe,
             break;
         }
 
+        case PIPE_FORMAT_B4G4R4A4_UNORM:
+        case PIPE_FORMAT_B4G4R4X4_UNORM:
         case PIPE_FORMAT_B5G5R5A1_UNORM:
         case PIPE_FORMAT_B5G5R5X1_UNORM: {
+            if (r300->screen->caps.is_r500)
+                break;
+
             /* 1555 colorbuffer blending consumes the constant color in
              * colorbuffer-lane order. Match the B5G5R5* output swizzle so
              * GL_CONSTANT_COLOR blending sees pipe RGBA.
@@ -1737,6 +1751,7 @@ static void*
     struct r300_context* r300 = r300_context(pipe);
     struct r300_sampler_state* sampler = CALLOC_STRUCT(r300_sampler_state);
     bool is_r500 = r300->screen->caps.is_r500;
+    int lod_bias_correction = 1;
     int lod_bias;
 
     sampler->state = *state;
@@ -1782,7 +1797,12 @@ static void*
     sampler->min_lod = (unsigned)MAX2(state->min_lod, 0);
     sampler->max_lod = (unsigned)MAX2(ceilf(state->max_lod), 0);
 
-    lod_bias = CLAMP((int)(state->lod_bias * 32 + 1), -(1 << 9), (1 << 9) - 1);
+    /* Fine-tune the existing empirical LOD bias correction for mip-nearest. */
+    if (state->min_mip_filter == PIPE_TEX_MIPFILTER_NEAREST)
+        lod_bias_correction += is_r500 ? 2 : 1;
+
+    lod_bias = CLAMP((int)(state->lod_bias * 32 + lod_bias_correction),
+                     -(1 << 9), (1 << 9) - 1);
 
     sampler->filter1 |= (lod_bias << R300_LOD_BIAS_SHIFT) & R300_LOD_BIAS_MASK;
 

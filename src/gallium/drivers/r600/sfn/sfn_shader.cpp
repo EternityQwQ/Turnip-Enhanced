@@ -136,12 +136,13 @@ ShaderInput::set_uses_interpolate_at_centroid()
 
 int64_t Shader::s_next_shader_id = 1;
 
-Shader::Shader(const char *type_id):
+Shader::Shader(const char *type_id, struct dynamic_offset dynamic_offset):
     m_current_block(nullptr),
     m_type_id(type_id),
     m_chip_class(ISA_CC_R600),
     m_next_block(0),
-    m_shader_id(s_next_shader_id++)
+    m_shader_id(s_next_shader_id++),
+    m_dynamic_offset(dynamic_offset)
 {
    m_instr_factory = new InstrFactory();
    m_chain_instr.this_shader = this;
@@ -507,7 +508,8 @@ Shader::value_factory()
 bool
 Shader::process(nir_shader *nir)
 {
-   m_ssbo_image_offset = nir->info.num_images;
+   clamp_dynamic_offset(nir->info.num_images);
+   m_shader_stage = nir->info.stage;
 
    if (nir->info.use_legacy_math_rules)
       set_flag(sh_legacy_math_rules);
